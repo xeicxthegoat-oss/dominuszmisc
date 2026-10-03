@@ -134,7 +134,7 @@ export default function App() {
         <div className="brand">
           <img src="/favicon.svg" alt="" width={48} height={48} />
           <div>
-            <div className="brand-name">Sakura Hub</div>
+            <div className="brand-name">JayZ Hub</div>
             <div className="brand-sub">Proxies · Cloud · Games · AI</div>
           </div>
           <button type="button" className="icon-btn nav-close" aria-label="Close menu" onClick={() => setNavOpen(false)}>
@@ -286,7 +286,7 @@ export default function App() {
           )}
         </main>
         <footer className="footer">
-          Sakura Hub · no ads, no trackers · links open the official sites · use services in line with your network’s rules
+          JayZ Hub · no ads, no trackers · links open the official sites · use services in line with your network’s rules
         </footer>
       </div>
     </div>
