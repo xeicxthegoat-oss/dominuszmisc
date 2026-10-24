@@ -1,913 +1,594 @@
---[[
-    Merebennie Hub V1.5  |  The Strongest Battlegrounds  |  Delta Executor
-    - Character-only rotation (HumanoidRootPart). The Camera is NEVER touched.
-    - Config auto-saves to MerebennieHub_V1.5.json (writefile) and auto-loads (readfile).
-]]
+--===================================================================================--
+--               MEREBENNIE HUB V1.5 - THE STRONGEST BATTLEGROUNDS                   --
+--                 COMPREHENSIVE ENTERPRISE-GRADE COMBAT MODULE                      --
+--===================================================================================--
 
--------------------------------------------------- SERVICES
-local Players      = game:GetService("Players")
-local RunService   = game:GetService("RunService")
-local UIS          = game:GetService("UserInputService")
+--===================================================================================--
+-- LAYER 0: SERVICE INITIALIZATION AND SYSTEM KERNEL
+--===================================================================================--
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
-local HttpService  = game:GetService("HttpService")
-local Lighting     = game:GetService("Lighting")
-local VIM          = nil
-pcall(function() VIM = game:GetService("VirtualInputManager") end)
+local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Debris = game:GetService("Debris")
+local Lighting = game:GetService("Lighting")
+local CoreGui = game:GetService("CoreGui")
 
-local lp = Players.LocalPlayer
-if not lp then return end
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-local function log(...) print("[Merebennie Hub]", ...) end
-
-if getgenv then
-    local old = getgenv().MerebennieHub
-    if old and old.Destroy then pcall(old.Destroy) end
+-- Ensure multi-execution protection layer
+if _G.MerebennieHubLoaded then
+    print("[MEREBENNIE KERNEL]: Core instance already operational. Halting redundant thread loops.")
+    return
 end
+_G.MerebennieHubLoaded = true
 
--------------------------------------------------- CONFIG SAVE SYSTEM
-local FILE = "MerebennieHub_V1.5.json"
-local Config = {}
+--===================================================================================--
+-- LAYER 1: CONFIGURATION INFRASTRUCTURE & STATE RETRIEVAL MATRIX
+--===================================================================================--
+local SystemRegistry = {
+    Storage = {
+        FileName = "MerebennieHub_TSB_V15.json",
+        DefaultState = {
+            FloaterTech = false,
+            FloatHeight = 15,
+            SupaTechV2 = false,
+            InstantTwisted = false,
+            SupaV3 = false,
+            SupaV3Delay = 150,
+            SideDashV3 = false,
+            LixTech = false,
+            BackDashCancel = false,
+            BoomyTwisted = false,
+            SideDashAssistV2 = false,
+            AssistRange = 35,
+            AutoBlock360 = false,
+            GuiVisible = true,
+            PrimaryColor = {168, 50, 247},
+            SecondaryColor = {15, 12, 22},
+            AccentColor = {245, 235, 255}
+        },
+        ActiveCache = {}
+    },
+    Signals = {},
+    GarbageCollection = {},
+    TargetingEngine = {
+        ActiveTarget = nil,
+        LockTimestamp = 0,
+        ExpirationPeriod = 5.0
+    }
+}
 
-local function loadConfig()
-    if not (readfile and isfile) then log("readfile/isfile unavailable - config disabled") return end
-    local ok, data = pcall(function()
-        if isfile(FILE) then return HttpService:JSONDecode(readfile(FILE)) end
-    end)
-    if ok and type(data) == "table" then Config = data log("Config loaded") else log("No config found, using defaults") end
-end
-
-local saveQueued = false
-local function save()
-    if saveQueued or not writefile then return end
-    saveQueued = true
-    task.delay(0.6, function()
-        saveQueued = false
-        local ok, err = pcall(function() writefile(FILE, HttpService:JSONEncode(Config)) end)
-        if not ok then log("Save failed:", err) end
-    end)
-end
-
-local function cfg(flag, default)
-    local v = Config[flag]
-    if v == nil then return default end
-    return v
-end
-
-local function getKey(flag, default)
-    local ok, kc = pcall(function() return Enum.KeyCode[cfg(flag, default)] end)
-    return ok and kc or Enum.KeyCode[default]
-end
-
-loadConfig()
-
--------------------------------------------------- CONNECTION / CLEANUP TRACKING
-local Conns, Alive = {}, true
-local function track(c) Conns[#Conns + 1] = c return c end
-local cleanupFns = {}
-
--------------------------------------------------- HELPERS
-local TAU = math.pi * 2
-local function flat(v) return Vector3.new(v.X, 0, v.Z) end
-local function unit(v) local m = v.Magnitude if m < 1e-4 then return nil end return v / m end
-local function rotY(v, ang) return CFrame.Angles(0, ang, 0):VectorToWorldSpace(v) end
-local function ease(a) return TweenService:GetValue(math.clamp(a, 0, 1), Enum.EasingStyle.Quart, Enum.EasingDirection.Out) end
-
-local function getChar()
-    local c = lp.Character
-    if not c then return end
-    local r = c:FindFirstChild("HumanoidRootPart")
-    local h = c:FindFirstChildOfClass("Humanoid")
-    if r and h and h.Health > 0 then return c, r, h end
-end
-
-local function nearestEnemy(range)
-    local _, root = getChar()
-    if not root then return end
-    local best, bestD, bestP = nil, range or math.huge, nil
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= lp and p.Character then
-            local r = p.Character:FindFirstChild("HumanoidRootPart")
-            local h = p.Character:FindFirstChildOfClass("Humanoid")
-            if r and h and h.Health > 0 then
-                local d = (r.Position - root.Position).Magnitude
-                if d < bestD then best, bestD, bestP = r, d, p end
-            end
+-- Deep copy table generator
+local function InitializeDeepCopy(sourceTable)
+    local targetTable = {}
+    for key, value in pairs(sourceTable) do
+        if type(value) == "table" then
+            targetTable[key] = InitializeDeepCopy(value)
+        else
+            targetTable[key] = value
         end
     end
-    return best, bestP, bestD
+    return targetTable
 end
 
-local function sendKey(kc, down)
-    if VIM then pcall(function() VIM:SendKeyEvent(down, kc, false, game) end) end
-end
-local function tapKey(kc, hold)
-    sendKey(kc, true) task.wait(hold or 0.05) sendKey(kc, false)
-end
-local function click()
-    if not VIM then return end
-    pcall(function()
-        local s = workspace.CurrentCamera.ViewportSize
-        VIM:SendMouseButtonEvent(s.X / 2, s.Y / 2, 0, true, game, 0)
-        task.wait(0.03)
-        VIM:SendMouseButtonEvent(s.X / 2, s.Y / 2, 0, false, game, 0)
-    end)
-end
+SystemRegistry.Storage.ActiveCache = InitializeDeepCopy(SystemRegistry.Storage.DefaultState)
 
--------------------------------------------------- MOTION ENGINE
--- Smooth velocity-driven movement. Rotates ONLY the character root, never the camera.
-local Busy = false
-local function motion(duration, velFn, faceFn, turnRate)
-    local _, root, hum = getChar()
-    if not root or Busy then return end
-    Busy = true
-    local prevAuto = hum.AutoRotate
-    hum.AutoRotate = false
-    local t = 0
-    local ok, err = pcall(function()
-        while t < duration and Alive do
-            local dt = RunService.Heartbeat:Wait()
-            t += dt
-            if not root.Parent or hum.Health <= 0 then break end
-            local a = math.clamp(t / duration, 0, 1)
-            local v, y = velFn(a, dt)
-            if v then
-                local cur = root.AssemblyLinearVelocity
-                root.AssemblyLinearVelocity = Vector3.new(v.X, y or cur.Y, v.Z)
-            end
-            if faceFn then
-                local look = faceFn(a)
-                if look and flat(look).Magnitude > 0.001 then
-                    local goal = CFrame.lookAt(root.Position, root.Position + flat(look))
-                    root.CFrame = root.CFrame:Lerp(goal, math.clamp(dt * (turnRate or 25), 0, 1))
-                end
-            end
+local function SaveSystemConfiguration()
+    if writefile then
+        local success, serializedData = pcall(function()
+            return HttpService:JSONEncode(SystemRegistry.Storage.ActiveCache)
+        end)
+        if success and serializedData then
+            pcall(function()
+                writefile(SystemRegistry.Storage.FileName, serializedData)
+            end)
         end
-    end)
-    pcall(function() hum.AutoRotate = prevAuto end)
-    Busy = false
-    if not ok then log("Motion error:", err) end
+    end
 end
 
--- Preferred direction: nearest enemy in range, else movement input, else facing.
-local function aimDir(root, hum)
-    local tgt = nearestEnemy(cfg("t_range", 45))
-    local d
-    if tgt then d = unit(flat(tgt.Position - root.Position)) end
-    if not d then d = unit(flat(hum.MoveDirection)) end
-    if not d then d = unit(flat(root.CFrame.LookVector)) end
-    return d or Vector3.new(0, 0, -1), tgt
-end
-
-local function sideSign()
-    if UIS:IsKeyDown(Enum.KeyCode.A) then return -1 end
-    if UIS:IsKeyDown(Enum.KeyCode.D) then return 1 end
-    return nil
-end
-
--------------------------------------------------- TECHS
-local function twist(o)
-    local _, root, hum = getChar()
-    if not root then return end
-    local d = aimDir(root, hum)
-    local p = cfg("t_power", 60) * (o.power or 1)
-    local wind = o.windup or 0
-    motion(o.dur, function(a)
-        if a < wind then return -d * p * 0.25 * (1 - a / wind) end
-        local b = (a - wind) / (1 - wind)
-        return d * p * (1 - b) ^ 1.6
-    end, function(a)
-        if a < wind then return d end
-        local b = (a - wind) / (1 - wind)
-        return rotY(d, (1 - ease(b)) * TAU * (o.spins or 1))
-    end, 90)
-end
-
-local function instantTwisted()  twist({dur = 0.28, power = 1.0, spins = 1}) end
-local function boomyTwisted()    twist({dur = 0.22, power = 1.5, spins = 1}) end
-local function boomyTwistedRW()  twist({dur = 0.34, power = 1.7, spins = 2, windup = 0.25}) end
-
-local function supaV2()
-    local _, root, hum = getChar() if not root then return end
-    local d = aimDir(root, hum)
-    local p = cfg("t_power", 60)
-    motion(0.38, function(a) return d * p * (1 - a * a) end, function() return d end, 30)
-end
-
-local function supaV3()
-    local _, root, hum = getChar() if not root then return end
-    local d = aimDir(root, hum)
-    local p = cfg("t_power", 60)
-    local right = Vector3.new(-d.Z, 0, d.X)
-    motion(0.55, function(a)
-        local m = math.sin(math.pi * (0.15 + 0.85 * a))
-        return d * p * 1.15 * m + right * math.sin(a * TAU) * p * 0.15
-    end, function() return d end, 30)
-end
-
-local lastSide = 1
-local function sideDashV3()
-    local _, root, hum = getChar() if not root then return end
-    local d, tgt = aimDir(root, hum)
-    local s = sideSign() or -lastSide
-    lastSide = s
-    local right = Vector3.new(-d.Z, 0, d.X) * s
-    local p = cfg("t_power", 60) * 1.5
-    motion(0.22, function(a) return (right + d * 0.2) * p * (1 - a) ^ 1.2 end,
-        function() if tgt and tgt.Parent then return tgt.Position - root.Position end return d end, 60)
-end
-
--- Orbit around a target (shared by Side Dash Assist, Oreo, Kyoto)
-local function orbit(tgt, sign, arcDeg, dur)
-    local _, root = getChar()
-    if not root or not tgt or not tgt.Parent then return end
-    local rel = flat(root.Position - tgt.Position)
-    local r = math.clamp(rel.Magnitude, 3.5, 8)
-    local ang0 = math.atan2(rel.Z, rel.X)
-    local toT = unit(-rel) or Vector3.new(0, 0, -1)
-    local wanted = Vector3.new(-toT.Z, 0, toT.X) * sign
-    local tangent = Vector3.new(-math.sin(ang0), 0, math.cos(ang0))
-    local sweep = math.rad(arcDeg) * (tangent:Dot(wanted) >= 0 and 1 or -1)
-    motion(dur, function(a, dt)
-        if not tgt.Parent then return end
-        local ang = ang0 + sweep * ease(a)
-        local goal = tgt.Position + Vector3.new(math.cos(ang), 0, math.sin(ang)) * r
-        local v = flat(goal - root.Position) / math.max(dt, 1 / 120)
-        if v.Magnitude > 95 then v = v.Unit * 95 end
-        return v
-    end, function() if tgt.Parent then return tgt.Position - root.Position end end, 45)
-end
-
-local function sideDashAssist()
-    local tgt = nearestEnemy(cfg("sda_range", 30))
-    if not tgt then return end
-    local s = sideSign() or -lastSide
-    lastSide = s
-    orbit(tgt, s, cfg("sda_arc", 110), cfg("sda_dur", 0.32))
-end
-
-local function lizTech() -- hop-dash with a flick turn (custom interpretation)
-    local _, root, hum = getChar() if not root then return end
-    local d = aimDir(root, hum)
-    local p = cfg("t_power", 60) * 0.9
-    motion(0.45, function(a)
-        local y = a < 0.5 and 30 * (1 - a * 2) or nil
-        return d * p * (1 - a * 0.5), y
-    end, function(a)
-        if a < 0.5 then return rotY(d, math.pi * ease(a * 2)) end
-        return rotY(d, math.pi * (1 - ease((a - 0.5) * 2)))
-    end, 70)
-end
-
-local function lunge(mult, dur)
-    local _, root, hum = getChar() if not root then return end
-    local d, tgt = aimDir(root, hum)
-    local p = cfg("t_power", 60) * mult
-    motion(dur, function(a) return d * p * (1 - a) ^ 1.3 end,
-        function() if tgt and tgt.Parent then return tgt.Position - root.Position end return d end, 50)
-end
-
-local function backDashCancel()
-    task.wait(cfg("bdc_delay", 0.12))
-    local _, root, hum = getChar() if not root then return end
-    pcall(function()
-        local an = hum:FindFirstChildOfClass("Animator")
-        if an then
-            for _, tr in ipairs(an:GetPlayingAnimationTracks()) do
-                local n = (tr.Name or ""):lower()
-                local id = (tr.Animation and tr.Animation.Name or ""):lower()
-                if n:find("dash") or id:find("dash") or n:find("back") then tr:Stop(0.05) end
-            end
-        end
-    end)
-    local v = root.AssemblyLinearVelocity
-    root.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)
-    Busy = false
-    lunge(0.4, 0.14)
-end
-
--- Macro techs (generic - set the "Move Key" to the hotbar slot you want used)
-local MacroBusy = false
-local function pressMove(flag) tapKey(getKey(flag, "One"), 0.05) end
-
-local function longslam()
-    if MacroBusy then return end MacroBusy = true
-    pcall(function()
-        task.spawn(function() task.wait(cfg("ls_delay", 0.12)) pressMove("ls_move") end)
-        lunge(1.3, 0.25)
-    end)
-    MacroBusy = false
-end
-
-local function oreo()
-    if MacroBusy then return end MacroBusy = true
-    pcall(function()
-        lunge(0.8, 0.18)
-        for _ = 1, cfg("oreo_hits", 2) do click() task.wait(0.12) end
-        local tgt = nearestEnemy(cfg("t_range", 45))
-        if tgt then orbit(tgt, sideSign() or lastSide, cfg("sda_arc", 110), 0.3) end
-        click() task.wait(0.08)
-        pressMove("oreo_move")
-    end)
-    MacroBusy = false
-end
-
-local function kyoto()
-    if MacroBusy then return end MacroBusy = true
-    pcall(function()
-        local trig = getKey("ky_key", "C")
-        local loops = 0
-        while Alive and cfg("ky_on", false) and UIS:IsKeyDown(trig) and loops < 20 do
-            loops += 1
-            local tgt = nearestEnemy(cfg("t_range", 45))
-            if not tgt then break end
-            lunge(0.9, 0.18)
-            click() task.wait(0.1) click()
-            orbit(tgt, -lastSide, cfg("sda_arc", 110), 0.28)
-            lastSide = -lastSide
-            pressMove("ky_move")
-            task.wait(cfg("ky_gap", 0.25))
-        end
-    end)
-    MacroBusy = false
-end
-
--- Registry: { display name, toggle flag, key flag, default key, function }
-local TechList = {
-    {"Instant Twisted",                  "t_twisted",  "k_twisted",  "T", instantTwisted},
-    {"Supa V2",                          "t_supa2",    "k_supa2",    "Y", supaV2},
-    {"Supa V3",                          "t_supa3",    "k_supa3",    "U", supaV3},
-    {"Side Dash V3",                     "t_side3",    "k_side3",    "G", sideDashV3},
-    {"Liz Tech (REWORKED)",              "t_liz",      "k_liz",      "H", lizTech},
-    {"BOOMY Instant Twisted",            "t_boomy",    "k_boomy",    "J", boomyTwisted},
-    {"BOOMY Instant Twisted [REWORKED]", "t_boomy2",   "k_boomy2",   "K", boomyTwistedRW},
-}
-
--------------------------------------------------- AUTO BLOCK (360)
-local blocking = false
-local function doBlock()
-    if blocking then return end
-    blocking = true
-    task.spawn(function()
-        local kc = getKey("ab_key", "F")
-        sendKey(kc, true)
-        task.wait(cfg("ab_hold", 0.35))
-        sendKey(kc, false)
-        task.wait(cfg("ab_cd", 0.1))
-        blocking = false
-    end)
-end
-
-local ACTION = {
-    [Enum.AnimationPriority.Action] = true, [Enum.AnimationPriority.Action2] = true,
-    [Enum.AnimationPriority.Action3] = true, [Enum.AnimationPriority.Action4] = true,
-}
-
-local function autoBlockStep()
-    if not cfg("ab_on", false) or blocking then return end
-    local _, root = getChar()
-    if not root then return end
-    local radius, speedThr = cfg("ab_radius", 18), cfg("ab_speed", 28)
-    for _, p in ipairs(Players:GetPlayers()) do
-        local ch = p ~= lp and p.Character
-        local er = ch and ch:FindFirstChild("HumanoidRootPart")
-        local eh = ch and ch:FindFirstChildOfClass("Humanoid")
-        if er and eh and eh.Health > 0 then
-            local off = root.Position - er.Position
-            local dist = off.Magnitude
-            if dist <= radius then -- full 360: no facing/angle restriction
-                -- 1) fast-closing body / hitbox velocity from any direction
-                local closing = er.AssemblyLinearVelocity:Dot(off / math.max(dist, 0.01))
-                if closing > speedThr then doBlock() return end
-                -- 2) enemy attack animation just started
-                if cfg("ab_anim", true) and dist <= radius * 0.8 then
-                    local an = eh:FindFirstChildOfClass("Animator")
-                    if an then
-                        for _, tr in ipairs(an:GetPlayingAnimationTracks()) do
-                            if ACTION[tr.Priority] and tr.TimePosition < 0.4 then doBlock() return end
-                        end
+local function LoadSystemConfiguration()
+    if readfile and isfile and isfile(SystemRegistry.Storage.FileName) then
+        local success, fileContents = pcall(function()
+            return readfile(SystemRegistry.Storage.FileName)
+        end)
+        if success and fileContents then
+            local parsingSuccess, parsedTable = pcall(function()
+                return HttpService:JSONDecode(fileContents)
+            end)
+            if parsingSuccess and type(parsedTable) == "table" then
+                for optionKey, valueData in pairs(parsedTable) do
+                    if SystemRegistry.Storage.ActiveCache[optionKey] ~= nil then
+                        SystemRegistry.Storage.ActiveCache[optionKey] = valueData
                     end
                 end
             end
         end
     end
 end
+LoadSystemConfiguration()
 
--------------------------------------------------- VISUALS / OPTIMIZATION / COLOR
-local function espStep()
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= lp and p.Character then
-            local h = p.Character:FindFirstChild("MBHub_ESP")
-            if cfg("v_esp", false) then
-                if not h then
-                    h = Instance.new("Highlight")
-                    h.Name = "MBHub_ESP"
-                    h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-                    h.OutlineColor = Color3.fromRGB(190, 90, 255)
-                    h.FillColor = Color3.fromRGB(150, 50, 255)
-                    h.FillTransparency = 0.7
-                    h.Parent = p.Character
+--===================================================================================--
+-- LAYER 2: SYSTEM CRITICAL TOUCHGUI INTERACTION PROTECTION
+--===================================================================================--
+local function ProcessTouchGuiValidation()
+    local executionStatus, executionError = pcall(function()
+        local touchGuiInstance = PlayerGui:FindFirstChild("TouchGui")
+        if touchGuiInstance then
+            if touchGuiInstance:IsA("ScreenGui") and not touchGuiInstance.Enabled then
+                touchGuiInstance.Enabled = true
+            end
+        end
+    end)
+    if not executionStatus and executionError then
+        warn("[MEREBENNIE CRITICAL ERROR]: TouchGui validation fault reported: " .. tostring(executionError))
+    end
+end
+
+task.spawn(function()
+    while _G.MerebennieHubLoaded do
+        task.wait(0.5)
+        ProcessTouchGuiValidation()
+    end
+end)
+
+--===================================================================================--
+-- LAYER 3: CORE RAYCASTING AND VECTOR MATHEMATICS ENGINE
+--===================================================================================--
+local AdvancedMathModule = {}
+
+function AdvancedMathModule.GetFlatVectorDistance(vectorA, vectorB)
+    return math.sqrt((vectorA.X - vectorB.X)^2 + (vectorA.Z - vectorB.Z)^2)
+end
+
+function AdvancedMathModule.ComputeOrbitCFrame(pivotPoint, referenceCFrame, lateralOffset, depthOffset)
+    local lateralStep = referenceCFrame.RightVector * lateralOffset
+    local depthStep = referenceCFrame.LookVector * depthOffset
+    local finalComputedPosition = referenceCFrame.Position + lateralStep + depthStep
+    return CFrame.new(finalComputedPosition, Vector3.new(pivotPoint.X, referenceCFrame.Position.Y, pivotPoint.Z))
+end
+
+function AdvancedMathModule.ScanTerrainClearance(characterModel)
+    local rootPart = characterModel:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return nil end
+    
+    local nativeRaycastParams = RaycastParams.new()
+    nativeRaycastParams.FilterDescendantsInstances = {characterModel}
+    nativeRaycastParams.FilterType = Enum.RaycastFilterType.Exclude
+    nativeRaycastParams.IgnoreWater = true
+    
+    local calculationResult = workspace:Raycast(rootPart.Position, Vector3.new(0, -100, 0), nativeRaycastParams)
+    return calculationResult
+end
+
+--===================================================================================--
+-- LAYER 4: TARGETING LOGIC AND PROXIMITY INDEX ARRAYS
+--===================================================================================--
+local function FetchOptimalProximityTarget(maximumStudRange)
+    local userCharacter = LocalPlayer.Character
+    local userRootPart = userCharacter and userCharacter:FindFirstChild("HumanoidRootPart")
+    if not userRootPart then return nil end
+    
+    local verifiedTarget = nil
+    local minimumDistanceFound = maximumStudRange
+    
+    local systemPlayersList = Players:GetPlayers()
+    for index = 1, #systemPlayersList do
+        local targetPlayer = systemPlayersList[index]
+        if targetPlayer ~= LocalPlayer and targetPlayer.Character then
+            local enemyRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+            local enemyHumanoid = targetPlayer.Character:FindFirstChild("Humanoid")
+            if enemyRoot and enemyHumanoid and enemyHumanoid.Health > 0 then
+                local computedDistance = (userRootPart.Position - enemyRoot.Position).Magnitude
+                if computedDistance < minimumDistanceFound then
+                    minimumDistanceFound = computedDistance
+                    verifiedTarget = targetPlayer.Character
                 end
-            elseif h then h:Destroy() end
-        end
-    end
-end
-
-local fbOrig
-local function setFullbright(on)
-    if on then
-        fbOrig = fbOrig or {Lighting.Brightness, Lighting.ClockTime, Lighting.GlobalShadows, Lighting.Ambient}
-        Lighting.Brightness, Lighting.ClockTime, Lighting.GlobalShadows = 2, 14, false
-        Lighting.Ambient = Color3.fromRGB(170, 170, 170)
-    elseif fbOrig then
-        Lighting.Brightness, Lighting.ClockTime, Lighting.GlobalShadows, Lighting.Ambient = table.unpack(fbOrig)
-        fbOrig = nil
-    end
-end
-
-local CC = Instance.new("ColorCorrectionEffect")
-CC.Name = "MBHub_CC"
-CC.Enabled = false
-CC.Parent = Lighting
-local function applyCC()
-    CC.Enabled = cfg("cc_on", false)
-    CC.TintColor = Color3.fromRGB(cfg("cc_r", 255), cfg("cc_g", 255), cfg("cc_b", 255))
-    CC.Saturation = cfg("cc_sat", 0)
-    CC.Contrast = cfg("cc_con", 0)
-    CC.Brightness = cfg("cc_bri", 0)
-end
-
-local boosted, boostConn = {}, nil
-local function boostInst(i)
-    if i:IsA("ParticleEmitter") or i:IsA("Trail") or i:IsA("Beam") or i:IsA("Smoke") or i:IsA("Fire") or i:IsA("Sparkles") then
-        if i.Enabled then boosted[#boosted + 1] = i i.Enabled = false end
-    end
-end
-local function setBoost(on)
-    if on then
-        pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
-        Lighting.GlobalShadows = false
-        for _, i in ipairs(workspace:GetDescendants()) do pcall(boostInst, i) end
-        boostConn = workspace.DescendantAdded:Connect(function(i) pcall(boostInst, i) end)
-        log("FPS boost applied")
-    else
-        if boostConn then boostConn:Disconnect() boostConn = nil end
-        for _, i in ipairs(boosted) do pcall(function() i.Enabled = true end) end
-        boosted = {}
-        Lighting.GlobalShadows = true
-    end
-end
-
--------------------------------------------------- GUI LIBRARY
-local PURPLE, BG, PANEL, PANEL2 = Color3.fromRGB(170, 70, 255), Color3.fromRGB(14, 11, 21), Color3.fromRGB(23, 18, 34), Color3.fromRGB(30, 24, 45)
-local TEXT, DIM = Color3.fromRGB(235, 228, 250), Color3.fromRGB(150, 140, 175)
-local FONT, FONTB = Enum.Font.GothamMedium, Enum.Font.GothamBold
-
-local function mk(class, props, parent)
-    local i = Instance.new(class)
-    for k, v in pairs(props) do i[k] = v end
-    i.Parent = parent
-    return i
-end
-local function corner(o, r) mk("UICorner", {CornerRadius = UDim.new(0, r or 6)}, o) end
-local function stroke(o, c, t, tr) return mk("UIStroke", {Color = c, Thickness = t or 1, Transparency = tr or 0, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, o) end
-local function tw(o, t, p) TweenService:Create(o, TweenInfo.new(t, Enum.EasingStyle.Quad), p):Play() end
-
-local gui = Instance.new("ScreenGui")
-gui.Name = "MerebennieHub"
-gui.ResetOnSpawn = false
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-if not pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end) then
-    gui.Parent = lp:WaitForChild("PlayerGui")
-end
-
-local main = mk("Frame", {Name = "Main", Size = UDim2.fromOffset(640, 410), Position = UDim2.new(0.5, -320, 0.5, -205),
-    BackgroundColor3 = BG, BorderSizePixel = 0}, gui)
-corner(main, 10)
-stroke(main, PURPLE, 2)
-mk("ImageLabel", {Name = "Glow", BackgroundTransparency = 1, Image = "rbxassetid://5028857084", ImageColor3 = PURPLE,
-    ImageTransparency = 0.55, ScaleType = Enum.ScaleType.Slice, SliceCenter = Rect.new(24, 24, 276, 276),
-    Size = UDim2.new(1, 50, 1, 50), Position = UDim2.fromOffset(-25, -25), ZIndex = 0}, main)
-
-local top = mk("Frame", {Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = PANEL, BorderSizePixel = 0}, main)
-corner(top, 10)
-mk("Frame", {Size = UDim2.new(1, 0, 0, 10), Position = UDim2.new(0, 0, 1, -10), BackgroundColor3 = PANEL, BorderSizePixel = 0}, top)
-mk("TextLabel", {Text = "Merebennie Hub V1.5", Font = FONTB, TextSize = 16, TextColor3 = PURPLE, BackgroundTransparency = 1,
-    Position = UDim2.fromOffset(14, 0), Size = UDim2.new(0.5, 0, 1, 0), TextXAlignment = Enum.TextXAlignment.Left}, top)
-mk("TextLabel", {Text = "The Strongest Battlegrounds", Font = FONT, TextSize = 11, TextColor3 = DIM, BackgroundTransparency = 1,
-    Position = UDim2.new(1, -230, 0, 0), Size = UDim2.fromOffset(190, 38), TextXAlignment = Enum.TextXAlignment.Right}, top)
-local minBtn = mk("TextButton", {Text = "–", Font = FONTB, TextSize = 20, TextColor3 = TEXT, BackgroundTransparency = 1,
-    Size = UDim2.fromOffset(34, 38), Position = UDim2.new(1, -34, 0, 0)}, top)
-
-local sidebar = mk("ScrollingFrame", {Position = UDim2.fromOffset(8, 46), Size = UDim2.new(0, 150, 1, -54), BackgroundColor3 = PANEL,
-    BorderSizePixel = 0, ScrollBarThickness = 2, ScrollBarImageColor3 = PURPLE, CanvasSize = UDim2.new(),
-    AutomaticCanvasSize = Enum.AutomaticSize.Y}, main)
-corner(sidebar, 8)
-mk("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, sidebar)
-mk("UIPadding", {PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5)}, sidebar)
-
-local content = mk("Frame", {Position = UDim2.fromOffset(166, 46), Size = UDim2.new(1, -174, 1, -54), BackgroundTransparency = 1}, main)
-
--- Dragging (works with mouse + touch)
-do
-    local dragging, startPos, startInput
-    top.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-            dragging, startPos, startInput = true, main.Position, i.Position
-        end
-    end)
-    track(UIS.InputChanged:Connect(function(i)
-        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-            local d = i.Position - startInput
-            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
-        end
-    end))
-    track(UIS.InputEnded:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
-    end))
-end
-
--- Floating open/close button
-local fab = mk("TextButton", {Text = "M", Font = FONTB, TextSize = 18, TextColor3 = TEXT, BackgroundColor3 = BG,
-    Size = UDim2.fromOffset(40, 40), Position = UDim2.new(0, 12, 0.5, -20), Visible = false}, gui)
-corner(fab, 20) stroke(fab, PURPLE, 2)
-local function toggleUI() main.Visible = not main.Visible fab.Visible = not main.Visible end
-minBtn.MouseButton1Click:Connect(toggleUI)
-fab.MouseButton1Click:Connect(toggleUI)
-
--- Tabs
-local Tabs, Tab = {}, {}
-Tab.__index = Tab
-
-local function selectTab(t)
-    for _, o in ipairs(Tabs) do
-        o.page.Visible = (o == t)
-        tw(o.btn, 0.15, {BackgroundColor3 = (o == t) and PURPLE or PANEL2, TextColor3 = (o == t) and Color3.new(1, 1, 1) or DIM})
-    end
-end
-
-local function newTab(name)
-    local btn = mk("TextButton", {Text = name, Font = FONT, TextSize = 12, TextColor3 = DIM, BackgroundColor3 = PANEL2,
-        Size = UDim2.new(1, 0, 0, 30), AutoButtonColor = false, LayoutOrder = #Tabs + 1}, sidebar)
-    corner(btn, 6)
-    local page = mk("ScrollingFrame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
-        ScrollBarThickness = 3, ScrollBarImageColor3 = PURPLE, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
-        Visible = false}, content)
-    mk("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, page)
-    mk("UIPadding", {PaddingRight = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6)}, page)
-    local t = setmetatable({page = page, btn = btn}, Tab)
-    Tabs[#Tabs + 1] = t
-    btn.MouseButton1Click:Connect(function() selectTab(t) end)
-    return t
-end
-
-local function row(page, h)
-    local f = mk("Frame", {Size = UDim2.new(1, 0, 0, h), BackgroundColor3 = PANEL, BorderSizePixel = 0}, page)
-    corner(f, 6)
-    stroke(f, Color3.fromRGB(70, 40, 110), 1, 0.3)
-    return f
-end
-
-local function safe(cb, ...) if cb then local ok, e = pcall(cb, ...) if not ok then log("Callback error:", e) end end end
-
-function Tab:Section(text)
-    mk("TextLabel", {Text = string.upper(text), Font = FONTB, TextSize = 11, TextColor3 = PURPLE, BackgroundTransparency = 1,
-        Size = UDim2.new(1, 0, 0, 18), TextXAlignment = Enum.TextXAlignment.Left}, self.page)
-end
-
-function Tab:Label(text)
-    mk("TextLabel", {Text = text, Font = FONT, TextSize = 12, TextColor3 = DIM, BackgroundTransparency = 1, TextWrapped = true,
-        Size = UDim2.new(1, 0, 0, 30), TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top}, self.page)
-end
-
-function Tab:Button(text, cb)
-    local f = row(self.page, 32)
-    local b = mk("TextButton", {Text = text, Font = FONT, TextSize = 13, TextColor3 = TEXT, BackgroundTransparency = 1,
-        Size = UDim2.fromScale(1, 1)}, f)
-    b.MouseButton1Click:Connect(function() tw(f, 0.1, {BackgroundColor3 = PANEL2}) task.delay(0.12, function() tw(f, 0.2, {BackgroundColor3 = PANEL}) end) safe(cb) end)
-end
-
-function Tab:Toggle(text, flag, default, cb)
-    local on = cfg(flag, default or false)
-    Config[flag] = on
-    local f = row(self.page, 36)
-    mk("TextLabel", {Text = text, Font = FONT, TextSize = 13, TextColor3 = TEXT, BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -110, 1, 0), TextXAlignment = Enum.TextXAlignment.Left,
-        TextTruncate = Enum.TextTruncate.AtEnd}, f)
-    local state = mk("TextLabel", {Font = FONTB, TextSize = 10, BackgroundTransparency = 1, Size = UDim2.fromOffset(28, 36),
-        Position = UDim2.new(1, -86, 0, 0)}, f)
-    local sw = mk("Frame", {Size = UDim2.fromOffset(40, 20), Position = UDim2.new(1, -52, 0.5, -10), BackgroundColor3 = PANEL2}, f)
-    corner(sw, 10)
-    local sws = stroke(sw, PURPLE, 1)
-    local knob = mk("Frame", {Size = UDim2.fromOffset(14, 14), Position = UDim2.fromOffset(3, 3), BackgroundColor3 = DIM}, sw)
-    corner(knob, 7)
-    local function render()
-        state.Text = on and "ON" or "OFF"
-        tw(state, 0.15, {TextColor3 = on and PURPLE or DIM})
-        tw(sw, 0.15, {BackgroundColor3 = on and PURPLE or PANEL2})
-        tw(knob, 0.15, {Position = on and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3), BackgroundColor3 = on and Color3.new(1, 1, 1) or DIM})
-        sws.Transparency = on and 0 or 0.6
-    end
-    render()
-    local btn = mk("TextButton", {Text = "", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1)}, f)
-    btn.MouseButton1Click:Connect(function()
-        on = not on
-        Config[flag] = on
-        render() save() safe(cb, on)
-    end)
-    task.defer(safe, cb, on) -- apply loaded state
-end
-
-function Tab:Slider(text, flag, min, max, default, step, cb)
-    local val = math.clamp(tonumber(cfg(flag, default)) or default, min, max)
-    Config[flag] = val
-    local f = row(self.page, 50)
-    mk("TextLabel", {Text = text, Font = FONT, TextSize = 13, TextColor3 = TEXT, BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(12, 4), Size = UDim2.new(1, -90, 0, 20), TextXAlignment = Enum.TextXAlignment.Left}, f)
-    local vl = mk("TextLabel", {Font = FONTB, TextSize = 12, TextColor3 = PURPLE, BackgroundTransparency = 1,
-        Position = UDim2.new(1, -78, 0, 4), Size = UDim2.fromOffset(66, 20), TextXAlignment = Enum.TextXAlignment.Right}, f)
-    local track_ = mk("Frame", {Position = UDim2.new(0, 12, 0, 33), Size = UDim2.new(1, -24, 0, 6), BackgroundColor3 = PANEL2}, f)
-    corner(track_, 3)
-    local fill = mk("Frame", {Size = UDim2.fromScale(0, 1), BackgroundColor3 = PURPLE}, track_)
-    corner(fill, 3)
-    local knob = mk("Frame", {Size = UDim2.fromOffset(12, 12), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5),
-        BackgroundColor3 = Color3.new(1, 1, 1)}, fill)
-    corner(knob, 6)
-    local function set(v, silent)
-        v = math.clamp(math.floor(v / step + 0.5) * step, min, max)
-        val = v
-        Config[flag] = v
-        local a = (v - min) / (max - min)
-        fill.Size = UDim2.fromScale(a, 1)
-        knob.Position = UDim2.fromScale(1, 0.5)
-        vl.Text = tostring(math.floor(v * 1000 + 0.5) / 1000)
-        if not silent then save() safe(cb, v) end
-    end
-    set(val, true)
-    local dragging = false
-    local function fromInput(i) set(min + (max - min) * math.clamp((i.Position.X - track_.AbsolutePosition.X) / track_.AbsoluteSize.X, 0, 1)) end
-    local hit = mk("TextButton", {Text = "", BackgroundTransparency = 1, Position = UDim2.new(0, 0, 0, 24), Size = UDim2.new(1, 0, 0, 26)}, f)
-    hit.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            self.page.ScrollingEnabled = false
-            fromInput(i)
-        end
-    end)
-    track(UIS.InputChanged:Connect(function(i)
-        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then fromInput(i) end
-    end))
-    track(UIS.InputEnded:Connect(function(i)
-        if dragging and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
-            dragging = false
-            self.page.ScrollingEnabled = true
-        end
-    end))
-    task.defer(safe, cb, val)
-end
-
-function Tab:Keybind(text, flag, default)
-    local name = cfg(flag, default)
-    Config[flag] = name
-    local f = row(self.page, 32)
-    mk("TextLabel", {Text = text, Font = FONT, TextSize = 13, TextColor3 = TEXT, BackgroundTransparency = 1,
-        Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -100, 1, 0), TextXAlignment = Enum.TextXAlignment.Left}, f)
-    local b = mk("TextButton", {Text = name, Font = FONTB, TextSize = 12, TextColor3 = PURPLE, BackgroundColor3 = PANEL2,
-        Size = UDim2.fromOffset(76, 22), Position = UDim2.new(1, -86, 0.5, -11), AutoButtonColor = false}, f)
-    corner(b, 5) stroke(b, PURPLE, 1, 0.4)
-    b.MouseButton1Click:Connect(function()
-        b.Text = "..."
-        local c
-        c = UIS.InputBegan:Connect(function(i)
-            if i.UserInputType == Enum.UserInputType.Keyboard then
-                if i.KeyCode ~= Enum.KeyCode.Escape then name = i.KeyCode.Name Config[flag] = name save() end
-                b.Text = name
-                c:Disconnect()
             end
+        end
+    end
+    return verifiedTarget
+end
+
+local function RegisterCombatHitboxSignature(instantiatedChild)
+    local validationString = string.lower(instantiatedChild.Name)
+    if validationString:find("hit") or validationString:find("attack") or validationString:find("combo") or validationString:find("action") or validationString:find("swing") then
+        local foundCombatant = FetchOptimalProximityTarget(16)
+        if foundCombatant then
+            SystemRegistry.TargetingEngine.ActiveTarget = foundCombatant
+            SystemRegistry.TargetingEngine.LockTimestamp = tick()
+        end
+    end
+end
+
+local function AttachCombatListenersToCharacter(activeCharacter)
+    if not activeCharacter then return end
+    
+    local childAddedConnection = activeCharacter.ChildAdded:Connect(function(newObject)
+        RegisterCombatHitboxSignature(newObject)
+    end)
+    table.insert(SystemRegistry.Signals, childAddedConnection)
+end
+
+SystemRegistry.Hooks = {
+    InitCharacterHooks = function()
+        LocalPlayer.CharacterAdded:Connect(function(newCharacter)
+            task.wait(0.5)
+            AttachCombatListenersToCharacter(newCharacter)
         end)
-    end)
+        AttachCombatListenersToCharacter(LocalPlayer.Character)
+    end
+}
+SystemRegistry.Hooks.InitCharacterHooks()
+
+--===================================================================================--
+-- LAYER 5: CHARACTER ORIENTATION LOCK CONTROLLERS
+--===================================================================================--
+local function FaceCharacterTowardsTargetCoordinates(targetVector3)
+    local sourceCharacter = LocalPlayer.Character
+    local sourceRootPart = sourceCharacter and sourceCharacter:FindFirstChild("HumanoidRootPart")
+    if sourceRootPart then
+        local planarTargetCoordinates = Vector3.new(targetVector3.X, sourceRootPart.Position.Y, targetVector3.Z)
+        if (sourceRootPart.Position - planarTargetCoordinates).Magnitude > 0.05 then
+            sourceRootPart.CFrame = CFrame.new(sourceRootPart.Position, planarTargetCoordinates)
+        end
+    end
 end
 
--------------------------------------------------- BUILD TABS
-local tMain   = newTab("Main")
-local tOpt    = newTab("Optimization")
-local tTechs  = newTab("Techs")
-local tVis    = newTab("Visuals")
-local tColor  = newTab("Game Color Changer")
-local tCD     = newTab("Cooldown Indicator")
-local tBlock  = newTab("Auto Block")
-local tLong   = newTab("Longslam V3")
-local tOreo   = newTab("Oreo")
-local tKyoto  = newTab("Auto-Kyoto V3")
-
--- MAIN
-tMain:Section("General")
-tMain:Label("Techs rotate only your character. Your camera is never modified. Rebind keys in each tab.")
-tMain:Keybind("Toggle UI Key", "ui_key", "RightShift")
-tMain:Slider("Tech Target Range (studs)", "t_range", 10, 120, 45, 1)
-tMain:Toggle("Mobile Tech Buttons", "mobile_btns", false, function(on)
-    local old = gui:FindFirstChild("MobileBtns")
-    if old then old:Destroy() end
-    if not on then return end
-    local fr = mk("Frame", {Name = "MobileBtns", BackgroundTransparency = 1, Size = UDim2.fromOffset(110, 300),
-        Position = UDim2.new(1, -120, 0.5, -150)}, gui)
-    mk("UIListLayout", {Padding = UDim.new(0, 4)}, fr)
-    for _, t in ipairs(TechList) do
-        local b = mk("TextButton", {Text = t[1]:gsub(" %[REWORKED%]", "*"), Font = FONT, TextSize = 10, TextColor3 = TEXT, TextWrapped = true,
-            BackgroundColor3 = BG, Size = UDim2.new(1, 0, 0, 30)}, fr)
-        corner(b, 6) stroke(b, PURPLE, 1)
-        b.MouseButton1Click:Connect(function() if cfg(t[2], false) then task.spawn(t[5]) end end)
-    end
+--===================================================================================--
+-- LAYER 6: GRAPHICAL USER INTERFACE ARCHITECTURE ("MEREBENNIE HUB V1.5")
+--===================================================================================--
+local UserInterfaceEngine = {}
+function UserInterfaceEngine.CreateCoreCanvas()
+local screenGuiObject = Instance.new("ScreenGui")
+screenGuiObject.Name = "MerebennieHub_CanvasV15"
+screenGuiObject.ResetOnSpawn = false
+screenGuiObject.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function()
+screenGuiObject.Parent = PlayerGui
 end)
-tMain:Section("Config")
-tMain:Button("Save Config Now", function() saveQueued = false save() log("Config saved to " .. FILE) end)
-tMain:Button("Reset Config (delete file)", function()
-    if delfile and isfile and pcall(isfile, FILE) and isfile(FILE) then pcall(delfile, FILE) end
-    log("Config deleted - re-execute the script")
+return screenGuiObject
+end
+local CoreCanvas = UserInterfaceEngine.CreateCoreCanvas()
+local function BuildUserInterfaceLayout()
+local cachedColors = SystemRegistry.Storage.ActiveCache
+local containerFrame = Instance.new("Frame")
+containerFrame.Name = "MerebennieMainFrame"
+containerFrame.Size = UDim2.new(0, 540, 0, 370)
+containerFrame.Position = UDim2.new(0.5, -270, 0.5, -185)
+containerFrame.BackgroundColor3 = Color3.fromRGB(cachedColors.SecondaryColor[1], cachedColors.SecondaryColor[2], cachedColors.SecondaryColor[3])
+containerFrame.BorderSizePixel = 0
+containerFrame.Active = true
+containerFrame.Draggable = true
+containerFrame.Visible = cachedColors.GuiVisible
+containerFrame.Parent = CoreCanvas
+local containerCorner = Instance.new("UICorner")
+containerCorner.CornerRadius = UDim.new(0, 10)
+containerCorner.Parent = containerFrame
+local neonBorderStroke = Instance.new("UIStroke")
+neonBorderStroke.Thickness = 2.5
+neonBorderStroke.Color = Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3])
+neonBorderStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+neonBorderStroke.Parent = containerFrame
+local applicationTitle = Instance.new("TextLabel")
+applicationTitle.Size = UDim2.new(1, -20, 0, 50)
+applicationTitle.Position = UDim2.new(0, 15, 0, 0)
+applicationTitle.BackgroundTransparency = 1
+applicationTitle.Text = "Merebennie Hub V1.5"
+applicationTitle.TextColor3 = Color3.fromRGB(cachedColors.AccentColor[1], cachedColors.AccentColor[2], cachedColors.AccentColor[3])
+applicationTitle.Font = Enum.Font.GothamBold
+applicationTitle.TextSize = 18
+applicationTitle.TextXAlignment = Enum.TextXAlignment.Left
+applicationTitle.Parent = containerFrame
+local dynamicTabList = Instance.new("Frame")
+dynamicTabList.Size = UDim2.new(0, 140, 1, -65)
+dynamicTabList.Position = UDim2.new(0, 12, 0, 52)
+dynamicTabList.BackgroundColor3 = Color3.fromRGB(22, 17, 30)
+dynamicTabList.BorderSizePixel = 0
+dynamicTabList.Parent = containerFrame
+local tabListCorner = Instance.new("UICorner")
+tabListCorner.CornerRadius = UDim.new(0, 8)
+tabListCorner.Parent = dynamicTabList
+local primaryScrollContainer = Instance.new("ScrollingFrame")
+primaryScrollContainer.Size = UDim2.new(1, -175, 1, -65)
+primaryScrollContainer.Position = UDim2.new(0, 163, 0, 52)
+primaryScrollContainer.BackgroundTransparency = 1
+primaryScrollContainer.CanvasSize = UDim2.new(0, 0, 0, 750)
+primaryScrollContainer.ScrollBarThickness = 5
+primaryScrollContainer.ScrollBarImageColor3 = Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3])
+primaryScrollContainer.Parent = containerFrame
+local contentLayoutManager = Instance.new("UIListLayout")
+contentLayoutManager.Padding = UDim.new(0, 8)
+contentLayoutManager.SortOrder = Enum.SortOrder.LayoutOrder
+contentLayoutManager.Parent = primaryScrollContainer
+local internalControlBuilders = {}
+function internalControlBuilders.InjectToggleElement(displayName, cacheKey)
+local frameLayout = Instance.new("Frame")
+frameLayout.Size = UDim2.new(1, -10, 0, 45)
+frameLayout.BackgroundColor3 = Color3.fromRGB(26, 20, 36)
+frameLayout.BorderSizePixel = 0
+frameLayout.Parent = primaryScrollContainer
+local cornerLayout = Instance.new("UICorner")
+cornerLayout.CornerRadius = UDim.new(0, 6)
+cornerLayout.Parent = frameLayout
+local labelLayout = Instance.new("TextLabel")
+labelLayout.Size = UDim2.new(1, -70, 1, 0)
+labelLayout.Position = UDim2.new(0, 12, 0, 0)
+labelLayout.BackgroundTransparency = 1
+labelLayout.Text = displayName
+labelLayout.TextColor3 = Color3.fromRGB(225, 215, 240)
+labelLayout.Font = Enum.Font.GothamSemibold
+labelLayout.TextSize = 13
+labelLayout.TextXAlignment = Enum.TextXAlignment.Left
+labelLayout.Parent = frameLayout
+local interactiveButton = Instance.new("TextButton")
+interactiveButton.Size = UDim2.new(0, 52, 0, 26)
+interactiveButton.Position = UDim2.new(1, -64, 0.5, -13)
+interactiveButton.BackgroundColor3 = SystemRegistry.Storage.ActiveCache[cacheKey] and Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3]) or Color3.fromRGB(46, 40, 60)
+interactiveButton.Text = ""
+interactiveButton.Parent = frameLayout
+local buttonCorner = Instance.new("UICorner")
+buttonCorner.CornerRadius = UDim.new(1, 0)
+buttonCorner.Parent = interactiveButton
+interactiveButton.MouseButton1Click:Connect(function()
+SystemRegistry.Storage.ActiveCache[cacheKey] = not SystemRegistry.Storage.ActiveCache[cacheKey]
+SaveSystemConfiguration()
+TweenService:Create(interactiveButton, TweenInfo.new(0.2), {
+BackgroundColor3 = SystemRegistry.Storage.ActiveCache[cacheKey] and Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3]) or Color3.fromRGB(46, 40, 60)
+}):Play()
 end)
-tMain:Button("Unload Hub", function() if getgenv and getgenv().MerebennieHub then getgenv().MerebennieHub.Destroy() end end)
-
--- OPTIMIZATION
-tOpt:Section("Performance")
-tOpt:Toggle("FPS Boost (disable effects/shadows)", "opt_boost", false, setBoost)
-tOpt:Slider("FPS Cap", "fps_cap", 30, 240, 60, 5, function(v) if setfpscap then pcall(setfpscap, v) end end)
-
--- TECHS
-tTechs:Section("Shared")
-tTechs:Slider("Dash Power", "t_power", 20, 120, 60, 1)
-for _, t in ipairs(TechList) do
-    tTechs:Section(t[1])
-    tTechs:Toggle(t[1], t[2], false)
-    tTechs:Keybind("   Key", t[3], t[4])
 end
-tTechs:Section("Side Dash Assist V2")
-tTechs:Toggle("Side Dash Assist V2", "sda_on", false)
-tTechs:Keybind("   Game Dash Key (hook)", "dash_key", "Q")
-tTechs:Slider("   Activation Range (studs)", "sda_range", 5, 80, 30, 1)
-tTechs:Slider("   Orbit Arc (degrees)", "sda_arc", 40, 200, 110, 5)
-tTechs:Slider("   Orbit Duration (s)", "sda_dur", 0.15, 0.8, 0.32, 0.01)
-tTechs:Section("Floater Tech")
-tTechs:Toggle("Floater Tech (hold Jump in air)", "t_floater", false)
-tTechs:Slider("   Max Fall Speed", "floater_fall", 1, 40, 8, 1)
-tTechs:Section("Back Dash Cancel")
-tTechs:Toggle("Back Dash Cancel (hooks S + dash key)", "bdc_on", false)
-tTechs:Slider("   Cancel Delay (s)", "bdc_delay", 0.03, 0.4, 0.12, 0.01)
-
--- VISUALS
-tVis:Section("ESP / Lighting")
-tVis:Toggle("Player Highlight ESP", "v_esp", false, function() pcall(espStep) end)
-tVis:Toggle("Fullbright", "v_fb", false, setFullbright)
-
--- COLOR CHANGER
-tColor:Section("Screen Color")
-tColor:Toggle("Enable Color Changer", "cc_on", false, applyCC)
-tColor:Slider("Tint Red", "cc_r", 0, 255, 255, 1, applyCC)
-tColor:Slider("Tint Green", "cc_g", 0, 255, 255, 1, applyCC)
-tColor:Slider("Tint Blue", "cc_b", 0, 255, 255, 1, applyCC)
-tColor:Slider("Saturation", "cc_sat", -1, 2, 0, 0.05, applyCC)
-tColor:Slider("Contrast", "cc_con", -1, 1, 0, 0.05, applyCC)
-tColor:Slider("Brightness", "cc_bri", -0.5, 0.5, 0, 0.02, applyCC)
-
--- COOLDOWN INDICATOR
-tCD:Section("HUD")
-tCD:Label("Reads Tool attributes / Enabled state; otherwise estimates from last use.")
-tCD:Toggle("Cooldown Indicator", "cd_on", false)
-tCD:Slider("Estimated Cooldown (s)", "cd_est", 1, 60, 10, 1)
-
--- AUTO BLOCK
-tBlock:Section("360° Auto Block")
-tBlock:Toggle("360° Auto Block", "ab_on", false)
-tBlock:Keybind("Block Key (game)", "ab_key", "F")
-tBlock:Slider("Detection Radius (studs)", "ab_radius", 6, 40, 18, 1)
-tBlock:Slider("Closing Speed Threshold", "ab_speed", 10, 90, 28, 1)
-tBlock:Slider("Block Hold Time (s)", "ab_hold", 0.1, 1.2, 0.35, 0.01)
-tBlock:Slider("Re-block Cooldown (s)", "ab_cd", 0.0, 0.5, 0.1, 0.01)
-tBlock:Toggle("Attack Animation Detection", "ab_anim", true)
-
--- LONGSLAM / OREO / KYOTO
-tLong:Section("Longslam V3")
-tLong:Toggle("Longslam V3", "ls_on", false)
-tLong:Keybind("Trigger Key", "ls_key", "Z")
-tLong:Keybind("Move Key (hotbar slot)", "ls_move", "One")
-tLong:Slider("Move Delay (s)", "ls_delay", 0.02, 0.4, 0.12, 0.01)
-
-tOreo:Section("Oreo")
-tOreo:Toggle("Oreo", "oreo_on", false)
-tOreo:Keybind("Trigger Key", "oreo_key", "X")
-tOreo:Keybind("Move Key (hotbar slot)", "oreo_move", "Two")
-tOreo:Slider("M1 Hits", "oreo_hits", 1, 5, 2, 1)
-
-tKyoto:Section("Auto-Kyoto V3")
-tKyoto:Toggle("Auto-Kyoto V3", "ky_on", false)
-tKyoto:Keybind("Hold Key", "ky_key", "C")
-tKyoto:Keybind("Move Key (hotbar slot)", "ky_move", "Three")
-tKyoto:Slider("Loop Gap (s)", "ky_gap", 0.1, 1, 0.25, 0.01)
-
--------------------------------------------------- COOLDOWN HUD
-local hud = mk("Frame", {Name = "CooldownHUD", BackgroundColor3 = BG, BackgroundTransparency = 0.15, Size = UDim2.fromOffset(170, 20),
-    Position = UDim2.new(0, 12, 1, -230), AutomaticSize = Enum.AutomaticSize.Y, Visible = false}, gui)
-corner(hud, 8) stroke(hud, PURPLE, 1.5)
-mk("UIListLayout", {Padding = UDim.new(0, 2)}, hud)
-mk("UIPadding", {PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4), PaddingLeft = UDim.new(0, 8)}, hud)
-local hudLabels, hooked, lastUse = {}, {}, {}
-
-local function cdStep()
-    hud.Visible = cfg("cd_on", false)
-    if not hud.Visible then return end
-    local tools = {}
-    local bp, ch = lp:FindFirstChildOfClass("Backpack"), lp.Character
-    for _, src in ipairs({bp, ch}) do
-        if src then for _, t in ipairs(src:GetChildren()) do if t:IsA("Tool") then tools[#tools + 1] = t end end end
-    end
-    for _, t in ipairs(tools) do
-        if not hooked[t] then hooked[t] = t.Activated:Connect(function() lastUse[t] = os.clock() end) end
-        local lbl = hudLabels[t]
-        if not lbl then
-            lbl = mk("TextLabel", {Font = FONT, TextSize = 12, BackgroundTransparency = 1, Size = UDim2.new(1, -8, 0, 16),
-                TextXAlignment = Enum.TextXAlignment.Left}, hud)
-            hudLabels[t] = lbl
-        end
-        local rem = tonumber(t:GetAttribute("Cooldown") or t:GetAttribute("CD") or t:GetAttribute("CooldownTime"))
-        if not rem or rem <= 0 then
-            local cv = t:FindFirstChild("Cooldown")
-            if cv and cv:IsA("NumberValue") then rem = cv.Value end
-        end
-        if (not rem or rem <= 0) and t.Enabled == false then rem = 1 end
-        if (not rem or rem <= 0) and lastUse[t] then rem = cfg("cd_est", 10) - (os.clock() - lastUse[t]) end
-        if rem and rem > 0 then
-            lbl.Text = string.format("%s  %.1fs", t.Name, rem)
-            lbl.TextColor3 = Color3.fromRGB(255, 90, 120)
-        else
-            lbl.Text = t.Name .. "  READY"
-            lbl.TextColor3 = PURPLE
-        end
-    end
-    for t, l in pairs(hudLabels) do
-        if not t.Parent then l:Destroy() hudLabels[t] = nil if hooked[t] then hooked[t]:Disconnect() hooked[t] = nil end end
-    end
+function internalControlBuilders.InjectSliderElement(displayName, cacheKey, minVal, maxVal, descriptorUnit)
+local frameLayout = Instance.new("Frame")
+frameLayout.Size = UDim2.new(1, -10, 0, 56)
+frameLayout.BackgroundColor3 = Color3.fromRGB(26, 20, 36)
+frameLayout.BorderSizePixel = 0
+frameLayout.Parent = primaryScrollContainer
+local cornerLayout = Instance.new("UICorner")
+cornerLayout.CornerRadius = UDim.new(0, 6)
+cornerLayout.Parent = frameLayout
+local labelLayout = Instance.new("TextLabel")
+labelLayout.Size = UDim2.new(0.65, 0, 0, 26)
+labelLayout.Position = UDim2.new(0, 12, 0, 2)
+labelLayout.BackgroundTransparency = 1
+labelLayout.Text = displayName
+labelLayout.TextColor3 = Color3.fromRGB(225, 215, 240)
+labelLayout.Font = Enum.Font.GothamSemibold
+labelLayout.TextSize = 13
+labelLayout.TextXAlignment = Enum.TextXAlignment.Left
+labelLayout.Parent = frameLayout
+local displayValueLabel = Instance.new("TextLabel")
+displayValueLabel.Size = UDim2.new(0.3, 0, 0, 26)
+displayValueLabel.Position = UDim2.new(0.65, 0, 0, 2)
+displayValueLabel.BackgroundTransparency = 1
+displayValueLabel.Text = tostring(SystemRegistry.Storage.ActiveCache[cacheKey]) .. descriptorUnit
+displayValueLabel.TextColor3 = Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3])
+displayValueLabel.Font = Enum.Font.GothamBold
+displayValueLabel.TextSize = 13
+displayValueLabel.TextXAlignment = Enum.TextXAlignment.Right
+displayValueLabel.Parent = frameLayout
+local sliderTrack = Instance.new("TextButton")
+sliderTrack.Size = UDim2.new(1, -24, 0, 6)
+sliderTrack.Position = UDim2.new(0, 12, 0, 38)
+sliderTrack.BackgroundColor3 = Color3.fromRGB(54, 46, 70)
+sliderTrack.Text = ""
+sliderTrack.Parent = frameLayout
+local currentPercentage = math.clamp((SystemRegistry.Storage.ActiveCache[cacheKey] - minVal) / (maxVal - minVal), 0, 1)
+local sliderFill = Instance.new("Frame")
+sliderFill.Size = UDim2.new(currentPercentage, 0, 1, 0)
+sliderFill.BackgroundColor3 = Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3])
+sliderFill.BorderSizePixel = 0
+sliderFill.Parent = sliderTrack
+local isUserDraggingSlider = false
+local function ProcessSliderAdjustment(inputObject)
+local boundedPercentage = math.clamp((inputObject.Position.X - sliderTrack.AbsolutePosition.X) / sliderTrack.AbsoluteSize.X, 0, 1)
+sliderFill.Size = UDim2.new(boundedPercentage, 0, 1, 0)
+local calculatedInteger = math.floor(minVal + (boundedPercentage * (maxVal - minVal)))
+displayValueLabel.Text = tostring(calculatedInteger) .. descriptorUnit
+SystemRegistry.Storage.ActiveCache[cacheKey] = calculatedInteger
+SaveSystemConfiguration()
 end
-
--------------------------------------------------- INPUT + MAIN LOOP
-track(UIS.InputBegan:Connect(function(i)
-    if i.UserInputType ~= Enum.UserInputType.Keyboard or UIS:GetFocusedTextBox() then return end
-    local k = i.KeyCode
-    if k == getKey("ui_key", "RightShift") then toggleUI() return end
-
-    for _, t in ipairs(TechList) do
-        if cfg(t[2], false) and k == getKey(t[3], t[4]) then task.spawn(function() pcall(t[5]) end) return end
-    end
-    if cfg("ls_on", false) and k == getKey("ls_key", "Z") then task.spawn(function() pcall(longslam) end) return end
-    if cfg("oreo_on", false) and k == getKey("oreo_key", "X") then task.spawn(function() pcall(oreo) end) return end
-    if cfg("ky_on", false) and k == getKey("ky_key", "C") then task.spawn(function() pcall(kyoto) end) return end
-
-    -- Hooks onto the game's own dash
-    if k == getKey("dash_key", "Q") then
-        if cfg("bdc_on", false) and UIS:IsKeyDown(Enum.KeyCode.S) and not sideSign() then
-            task.spawn(function() pcall(backDashCancel) end)
-        elseif cfg("sda_on", false) and sideSign() then
-            task.spawn(function() task.wait(0.03) pcall(sideDashAssist) end)
-        end
-    end
-end))
-
-local blockAcc, slowAcc, cdAcc = 0, 0, 0
-track(RunService.Heartbeat:Connect(function(dt)
-    if not Alive then return end
-    if cfg("t_floater", false) then
-        local _, root, hum = getChar()
-        if root and hum:GetState() == Enum.HumanoidStateType.Freefall and (UIS:IsKeyDown(Enum.KeyCode.Space) or hum.Jump) then
-            local v = root.AssemblyLinearVelocity
-            local fall = -cfg("floater_fall", 8)
-            if v.Y < fall then
-                root.AssemblyLinearVelocity = Vector3.new(v.X, v.Y + (fall - v.Y) * math.min(1, dt * 10), v.Z)
-            end
-        end
-    end
-    blockAcc += dt
-    if blockAcc >= 0.05 then blockAcc = 0 pcall(autoBlockStep) end
-    cdAcc += dt
-    if cdAcc >= 0.15 then cdAcc = 0 pcall(cdStep) end
-    slowAcc += dt
-    if slowAcc >= 1 then slowAcc = 0 pcall(espStep) end
-end))
-
--------------------------------------------------- FINISH
-selectTab(Tabs[1])
-
-local function destroy()
-    Alive = false
-    for _, c in ipairs(Conns) do pcall(function() c:Disconnect() end) end
-    for _, c in pairs(hooked) do pcall(function() c:Disconnect() end) end
-    pcall(setBoost, false)
-    pcall(setFullbright, false)
-    pcall(function() CC:Destroy() end)
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p.Character then local h = p.Character:FindFirstChild("MBHub_ESP") if h then h:Destroy() end end
-    end
-    pcall(function() gui:Destroy() end)
-    log("Unloaded")
+sliderTrack.InputBegan:Connect(function(inputObject)
+if inputObject.UserInputType == Enum.UserInputType.MouseButton1 or inputObject.UserInputType == Enum.UserInputType.Touch then
+isUserDraggingSlider = true
+ProcessSliderAdjustment(inputObject)
 end
-if getgenv then getgenv().MerebennieHub = {Destroy = destroy} end
-
-if setfpscap then pcall(setfpscap, cfg("fps_cap", 60)) end
-applyCC()
-log("Loaded V1.5 - press " .. cfg("ui_key", "RightShift") .. " or tap the M button to toggle the UI")
+end)
+UserInputService.InputChanged:Connect(function(inputObject)
+if isUserDraggingSlider and (inputObject.UserInputType == Enum.UserInputType.MouseMovement or inputObject.UserInputType == Enum.UserInputType.Touch) then
+ProcessSliderAdjustment(inputObject)
+end
+end)
+UserInputService.InputEnded:Connect(function(inputObject)
+if inputObject.UserInputType == Enum.UserInputType.MouseButton1 or inputObject.UserInputType == Enum.UserInputType.Touch then
+isUserDraggingSlider = false
+end
+end)
+end
+local combatTabButton = Instance.new("TextButton")
+combatTabButton.Size = UDim2.new(1, -12, 0, 40)
+combatTabButton.Position = UDim2.new(0, 6, 0, 6)
+combatTabButton.BackgroundColor3 = Color3.fromRGB(38, 30, 54)
+combatTabButton.Text = "Combat System"
+combatTabButton.TextColor3 = Color3.fromRGB(245, 240, 255)
+combatTabButton.Font = Enum.Font.GothamBold
+combatTabButton.TextSize = 13
+combatTabButton.Parent = dynamicTabList
+local tabButtonCorner = Instance.new("UICorner")
+tabButtonCorner.CornerRadius = UDim.new(0, 5)
+tabButtonCorner.Parent = combatTabButton
+-- Instantiate interface toggles and continuous adjustments
+internalControlBuilders.InjectToggleElement("Complex Floater Tech", "FloaterTech")
+internalControlBuilders.InjectSliderElement("Float Velocity Cutoff", "FloatHeight", 5, 40, " Vel")
+internalControlBuilders.InjectToggleElement("Supa Tech V2 (Combo)", "SupaTechV2")
+internalControlBuilders.InjectToggleElement("Instant Twisted", "InstantTwisted")
+internalControlBuilders.InjectToggleElement("Supa V3 Extended", "SupaV3")
+internalControlBuilders.InjectSliderElement("Supa V3 Frame Delay", "SupaV3Delay", 50, 400, "ms")
+internalControlBuilders.InjectToggleElement("Side Dash V3", "SideDashV3")
+internalControlBuilders.InjectToggleElement("Lix Tech [REWORKED]", "LixTech")
+internalControlBuilders.InjectToggleElement("Back Dash Cancel", "BackDashCancel")
+internalControlBuilders.InjectToggleElement("BOOMY Instant Twisted", "BoomyTwisted")
+internalControlBuilders.InjectToggleElement("Automated Side Dash Assist V2", "SideDashAssistV2")
+internalControlBuilders.InjectSliderElement("Assist Scan Range", "AssistRange", 10, 100, " Studs")
+internalControlBuilders.InjectToggleElement("360-Degree Auto Block", "AutoBlock360")
+local floatMenuToggle = Instance.new("TextButton")
+floatMenuToggle.Size = UDim2.new(0, 80, 0, 35)
+floatMenuToggle.Position = UDim2.new(0, 15, 0, 15)
+floatMenuToggle.BackgroundColor3 = Color3.fromRGB(12, 9, 18)
+floatMenuToggle.Text = "Merebennie"
+floatMenuToggle.TextColor3 = Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3])
+floatMenuToggle.Font = Enum.Font.GothamBold
+floatMenuToggle.TextSize = 11
+floatMenuToggle.Parent = CoreCanvas
+local toggleButtonCorner = Instance.new("UICorner")
+toggleButtonCorner.CornerRadius = UDim.new(0, 6)
+toggleButtonCorner.Parent = floatMenuToggle
+local toggleButtonStroke = Instance.new("UIStroke")
+toggleButtonStroke.Thickness = 1.5
+toggleButtonStroke.Color = Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3])
+toggleButtonStroke.Parent = floatMenuToggle
+floatMenuToggle.MouseButton1Click:Connect(function()
+SystemRegistry.Storage.ActiveCache.GuiVisible = not SystemRegistry.Storage.ActiveCache.GuiVisible
+containerFrame.Visible = SystemRegistry.Storage.ActiveCache.GuiVisible
+SaveSystemConfiguration()
+end)
+end
+BuildUserInterfaceLayout()
+--===================================================================================--
+-- LAYER 7: AUTOMATED REAL COMBAT EXECUTION LOOPS ("TECHS")
+--===================================================================================--
+-- Execution loop 1: Advanced Physics Automation (Complex Floater Tech Engine)
+RunService.Heartbeat:Connect(function()
+if not SystemRegistry.Storage.ActiveCache.FloaterTech then return end
+local nativeCharacter = LocalPlayer.Character
+local coreRootPart = nativeCharacter and nativeCharacter:FindFirstChild("HumanoidRootPart")
+local coreHumanoid = nativeCharacter and nativeCharacter:FindFirstChild("Humanoid")
+if not coreRootPart or not coreHumanoid then return end
+local currentVelocityVector = coreRootPart.AssemblyLinearVelocity
+local activeState = coreHumanoid:GetState()
+if activeState == Enum.HumanoidStateType.FreeFall or currentVelocityVector.Y < -12 then
+local targetGroundRaycast = AdvancedMathModule.ScanTerrainClearance(nativeCharacter)
+if targetGroundRaycast and targetGroundRaycast.Distance <= 7 then
+-- Bounce Suppression mechanism activated
+local configuredVelocityCutoff = SystemRegistry.Storage.ActiveCache.FloatHeight
+coreRootPart.AssemblyLinearVelocity = Vector3.new(currentVelocityVector.X, math.clamp(currentVelocityVector.Y, -1, configuredVelocityCutoff), currentVelocityVector.Z)
+local internalBodyVelocity = coreRootPart:FindFirstChild("MerebennieVForce") or Instance.new("BodyVelocity")
+internalBodyVelocity.Name = "MerebennieVForce"
+internalBodyVelocity.MaxForce = Vector3.new(0, 16000, 0)
+internalBodyVelocity.Velocity = Vector3.new(0, configuredVelocityCutoff * 0.45, 0)
+internalBodyVelocity.Parent = coreRootPart
+end
+else
+local existingForceObject = coreRootPart:FindFirstChild("MerebennieVForce")
+if existingForceObject then
+existingForceObject:Destroy()
+end
+end
+end)
+-- Execution loop 2: Sequence Automation Matrix
+RunService.PreSimulation:Connect(function()
+local executionCharacter = LocalPlayer.Character
+local executionRootPart = executionCharacter and executionCharacter:FindFirstChild("HumanoidRootPart")
+local executionHumanoid = executionCharacter and executionCharacter:FindFirstChild("Humanoid")
+if not executionRootPart or not executionHumanoid then return end
+local activeCacheReference = SystemRegistry.Storage.ActiveCache
+-- Enforce absolute 5-second lifespan on target acquisition link cache
+if SystemRegistry.TargetingEngine.ActiveTarget and (tick() - SystemRegistry.TargetingEngine.LockTimestamp > SystemRegistry.TargetingEngine.ExpirationPeriod) then
+SystemRegistry.TargetingEngine.ActiveTarget = nil
+end
+-- Supa Tech V2 & V3 Smart Automated Combo Extender Engine
+local currentTargetObject = SystemRegistry.TargetingEngine.ActiveTarget
+if (activeCacheReference.SupaTechV2 or activeCacheReference.SupaV3) and currentTargetObject and currentTargetObject:FindFirstChild("HumanoidRootPart") then
+local targetRootPart = currentTargetObject.HumanoidRootPart
+local structuralDistance = (executionRootPart.Position - targetRootPart.Position).Magnitude
+if executionCharacter:FindFirstChild("Attacking") and structuralDistance <= 18 then
+FaceCharacterTowardsTargetCoordinates(targetRootPart.Position)
+if activeCacheReference.SupaV3 then
+task.wait(activeCacheReference.SupaV3Delay / 1000)
+end
+-- Frame execution combo tracking displacement math
+executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(0, 0, 1.4)
+task.wait(0.01)
+executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(0, 0, -6.5)
+SystemRegistry.TargetingEngine.ActiveTarget = nil
+end
+end
+-- Instant Twisted & BOOMY Variant Mechanics Engine
+if (activeCacheReference.InstantTwisted or activeCacheReference.BoomyTwisted) and executionCharacter:FindFirstChild("Attacking") then
+local nearestThreatModel = FetchOptimalProximityTarget(15)
+if nearestThreatModel and nearestThreatModel:FindFirstChild("HumanoidRootPart") then
+local enemyCoordinates = nearestThreatModel.HumanoidRootPart.Position
+if activeCacheReference.BoomyTwisted then
+executionRootPart.CFrame = CFrame.new(executionRootPart.Position, Vector3.new(enemyCoordinates.X, executionRootPart.Position.Y, enemyCoordinates.Z)) * CFrame.Angles(0, math.rad(115), 0)
+executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(0, 0, -5)
+else
+executionRootPart.CFrame = CFrame.new(executionRootPart.Position, Vector3.new(enemyCoordinates.X, executionRootPart.Position.Y, enemyCoordinates.Z)) * CFrame.Angles(0, math.rad(90), 0)
+executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(0, 0, -5)
+end
+end
+end
+-- Side Dash V3 Engine
+if activeCacheReference.SideDashV3 and executionCharacter:FindFirstChild("Dashing") then
+local dynamicThreatModel = FetchOptimalProximityTarget(25)
+if dynamicThreatModel and dynamicThreatModel:FindFirstChild("HumanoidRootPart") then
+FaceCharacterTowardsTargetCoordinates(dynamicThreatModel.HumanoidRootPart.Position)
+executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(7, 0, 0)
+end
+end
+-- Lix Tech Animation Reworked Engine
+if activeCacheReference.LixTech and executionCharacter:FindFirstChild("Attacking") then
+executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(0.5, 0, -0.5)
+RunService.RenderStepped:Wait()
+executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(-0.5, 0, 0.5)
+end
+-- Back Dash Cancel Override Engine
+if activeCacheReference.BackDashCancel and executionCharacter:FindFirstChild("BackDashing") then
+pcall(function()
+executionCharacter.BackDashing:Destroy()
+end)
+executionRootPart.AssemblyLinearVelocity = executionRootPart.CFrame.LookVector * 52
+end
+-- Automated Side Dash Assist V2 Module
+if activeCacheReference.SideDashAssistV2 then
+local prioritizedEnemyCharacter = FetchOptimalProximityTarget(activeCacheReference.AssistRange)
+if prioritizedEnemyCharacter and prioritizedEnemyCharacter:FindFirstChild("HumanoidRootPart") then
+local enemyRootCoordinates = prioritizedEnemyCharacter.HumanoidRootPart.Position
+FaceCharacterTowardsTargetCoordinates(enemyRootCoordinates)
+local targetOrbitCFrame = executionRootPart.CFrame * CFrame.new(8, 0, -4)
+executionRootPart.CFrame = executionRootPart.CFrame:Keep(0.16)
+executionRootPart.CFrame = executionRootPart.CFrame:Lerp(CFrame.new(targetOrbitCFrame.Position, Vector3.new(enemyRootCoordinates.X, executionRootPart.Position.Y, enemyRootCoordinates.Z)), 0.16)
+end
+end
+end)
+--===================================================================================--
+-- LAYER 8: 360-DEGREE RADIAL DETECTOR & AUTO BLOCK MECHANIC
+--===================================================================================--
+RunService.Stepped:Connect(function()
+if not SystemRegistry.Storage.ActiveCache.AutoBlock360 then return end
+local checkingCharacter = LocalPlayer.Character
+local checkingRootPart = checkingCharacter and checkingCharacter:FindFirstChild("HumanoidRootPart")
+if not checkingRootPart then return end
+local systemPlayers = Players:GetPlayers()
+for activeIndex = 1, #systemPlayers do
+local externalPlayer = systemPlayers[activeIndex]
+if externalPlayer ~= LocalPlayer and externalPlayer.Character then
+local opponentCharacter = externalPlayer.Character
+local opponentRootPart = opponentCharacter:FindFirstChild("HumanoidRootPart")
+if opponentRootPart then
+if opponentCharacter:FindFirstChild("Attacking") or opponentCharacter:FindFirstChild("ForwardV") or opponentCharacter:FindFirstChild("DashVelocity") then
+local structuralRadiusDistance = (checkingRootPart.Position - opponentRootPart.Position).Magnitude
+if structuralRadiusDistance <= 16.5 then
+local activeGuardTool = checkingCharacter:FindFirstChild("Block") or checkingCharacter:FindFirstChild("Guard")
+if activeGuardTool and activeGuardTool:IsA("Tool") then
+activeGuardTool:Activate()
+end
+end
+end
+end
+end
+end
+end)
+print("[MEREBENNIE HUB]: Fully integrated modular code logic engine initiated successfully.")
