@@ -82,18 +82,59 @@ local function getChar()
     if r and h and h.Health > 0 then return c, r, h end
 end
 
+-- Targets: other players PLUS dummies / NPCs (e.g. the Weakest Dummy in the training area). Toggle: Main > "Target Dummies / NPCs".
+local npcCache, npcT = {}, 0
+local function npcRoot(m)
+    return m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart or m:FindFirstChild("Torso")
+end
+local function refreshNpcs()
+    if os.clock() - npcT < 2 then return npcCache end
+    npcT = os.clock()
+    local list = {}
+    local function consider(m)
+        if m:IsA("Model") and m ~= lp.Character and not Players:GetPlayerFromCharacter(m) then
+            if m:FindFirstChildOfClass("Humanoid") and npcRoot(m) then list[#list + 1] = m end
+        end
+    end
+    local live = workspace:FindFirstChild("Live")
+    if live then
+        for _, m in ipairs(live:GetChildren()) do consider(m) end
+    else
+        for _, m in ipairs(workspace:GetChildren()) do
+            consider(m)
+            if m:IsA("Folder") or m:IsA("Model") then for _, c in ipairs(m:GetChildren()) do consider(c) end end
+        end
+    end
+    npcCache = list
+    return list
+end
+local function enemyList()
+    local out = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        local ch = p ~= lp and p.Character
+        local r = ch and ch:FindFirstChild("HumanoidRootPart")
+        local h = ch and ch:FindFirstChildOfClass("Humanoid")
+        if r and h then out[#out + 1] = {root = r, hum = h, char = ch, player = p} end
+    end
+    if cfg("t_npcs", true) then
+        for _, m in ipairs(refreshNpcs()) do
+            if m.Parent then
+                local r, h = npcRoot(m), m:FindFirstChildOfClass("Humanoid")
+                if r and h then out[#out + 1] = {root = r, hum = h, char = m} end
+            end
+        end
+    end
+    return out
+end
+
 local function nearestEnemy(range)
     local _, root = getChar()
     if not root then return end
     local best, bestD, bestP, bestH = nil, range or math.huge, nil, nil
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= lp and p.Character then
-            local r = p.Character:FindFirstChild("HumanoidRootPart")
-            local h = p.Character:FindFirstChildOfClass("Humanoid")
-            if r and h and h.Health > 0 then
-                local d = (r.Position - root.Position).Magnitude
-                if d < bestD then best, bestD, bestP, bestH = r, d, p, h end
-            end
+    for _, e in ipairs(enemyList()) do
+        if e.hum.Health > 0 then
+            local d = (e.root.Position - root.Position).Magnitude
+            if d < bestD then best, bestD, bestP, bestH = e.root, d, e.player, e.hum end
         end
     end
     return best, bestH, bestP, bestD
@@ -679,10 +720,8 @@ local function autoBlockStep()
     local _, root = getChar()
     if not root then return end
     local radius, speedThr = cfg("ab_radius", 18), cfg("ab_speed", 28)
-    for _, p in ipairs(Players:GetPlayers()) do
-        local ch = p ~= lp and p.Character
-        local er = ch and ch:FindFirstChild("HumanoidRootPart")
-        local eh = ch and ch:FindFirstChildOfClass("Humanoid")
+    for _, en in ipairs(enemyList()) do
+        local er, eh = en.root, en.hum
         if er and eh and eh.Health > 0 then
             local off = root.Position - er.Position
             local dist = off.Magnitude
@@ -704,9 +743,10 @@ end
 
 -------------------------------------------------- VISUALS / OPTIMIZATION / COLOR
 local function espStep()
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= lp and p.Character then
-            local h = p.Character:FindFirstChild("MBHub_ESP")
+    for _, en in ipairs(enemyList()) do
+        local ch = en.char
+        if ch then
+            local h = ch:FindFirstChild("MBHub_ESP")
             if cfg("v_esp", false) then
                 if not h then
                     h = Instance.new("Highlight")
@@ -715,7 +755,7 @@ local function espStep()
                     h.OutlineColor = Color3.fromRGB(190, 90, 255)
                     h.FillColor = Color3.fromRGB(150, 50, 255)
                     h.FillTransparency = 0.7
-                    h.Parent = p.Character
+                    h.Parent = ch
                 end
             elseif h then h:Destroy() end
         end
@@ -1143,6 +1183,7 @@ tMain:Section("General")
 tMain:Label("Techs rotate only your character; the camera is never modified. Keyboard users can rebind keys per tab. Phone/tablet users use the draggable Action Pad.")
 tMain:Keybind("Toggle UI Key", "ui_key", "RightShift")
 tMain:Slider("Tech Target Range (studs)", "t_range", 10, 120, 45, 1)
+tMain:Toggle("Target Dummies / NPCs (Weakest Dummy)", "t_npcs", true)
 tMain:Toggle("Mobile Action Pad", "mobile_btns", IS_TOUCH, function(on) if pad then pad.Visible = on end end)
 tMain:Toggle("Keep Touch Controls Visible", "keep_touch", true)
 
@@ -1417,8 +1458,9 @@ local function destroy()
     pcall(setBoost, false)
     pcall(setFullbright, false)
     pcall(function() CC:Destroy() end)
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p.Character then local h = p.Character:FindFirstChild("MBHub_ESP") if h then h:Destroy() end end
+    for _, e in ipairs(enemyList()) do
+        local h = e.char and e.char:FindFirstChild("MBHub_ESP")
+        if h then h:Destroy() end
     end
     pcall(function() gui:Destroy() end)
     log("Unloaded")
