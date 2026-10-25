@@ -1,594 +1,1430 @@
---===================================================================================--
---               MEREBENNIE HUB V1.5 - THE STRONGEST BATTLEGROUNDS                   --
---                 COMPREHENSIVE ENTERPRISE-GRADE COMBAT MODULE                      --
---===================================================================================--
+--[[
+    Merebennie Hub V1.5  |  The Strongest Battlegrounds  |  Delta Executor (PC + Mobile)
+    - Character-only rotation (HumanoidRootPart). The Camera is NEVER touched.
+    - Config auto-saves to MerebennieHub_V1.5.json (writefile) and auto-loads (readfile).
+]]
 
---===================================================================================--
--- LAYER 0: SERVICE INITIALIZATION AND SYSTEM KERNEL
---===================================================================================--
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
+-------------------------------------------------- SERVICES
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local UIS          = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
-local HttpService = game:GetService("HttpService")
-local UserInputService = game:GetService("UserInputService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Debris = game:GetService("Debris")
-local Lighting = game:GetService("Lighting")
-local CoreGui = game:GetService("CoreGui")
+local HttpService  = game:GetService("HttpService")
+local Lighting     = game:GetService("Lighting")
+local VIM          = nil
+pcall(function() VIM = game:GetService("VirtualInputManager") end)
 
-local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local IS_TOUCH = UIS.TouchEnabled
+local HAS_KB = UIS.KeyboardEnabled
+local lp = Players.LocalPlayer
+if not lp then return end
 
--- Ensure multi-execution protection layer
-if _G.MerebennieHubLoaded then
-    print("[MEREBENNIE KERNEL]: Core instance already operational. Halting redundant thread loops.")
-    return
+local function log(...) print("[Merebennie Hub]", ...) end
+
+if getgenv then
+    local old = getgenv().MerebennieHub
+    if old and old.Destroy then pcall(old.Destroy) end
 end
-_G.MerebennieHubLoaded = true
 
---===================================================================================--
--- LAYER 1: CONFIGURATION INFRASTRUCTURE & STATE RETRIEVAL MATRIX
---===================================================================================--
-local SystemRegistry = {
-    Storage = {
-        FileName = "MerebennieHub_TSB_V15.json",
-        DefaultState = {
-            FloaterTech = false,
-            FloatHeight = 15,
-            SupaTechV2 = false,
-            InstantTwisted = false,
-            SupaV3 = false,
-            SupaV3Delay = 150,
-            SideDashV3 = false,
-            LixTech = false,
-            BackDashCancel = false,
-            BoomyTwisted = false,
-            SideDashAssistV2 = false,
-            AssistRange = 35,
-            AutoBlock360 = false,
-            GuiVisible = true,
-            PrimaryColor = {168, 50, 247},
-            SecondaryColor = {15, 12, 22},
-            AccentColor = {245, 235, 255}
-        },
-        ActiveCache = {}
-    },
-    Signals = {},
-    GarbageCollection = {},
-    TargetingEngine = {
-        ActiveTarget = nil,
-        LockTimestamp = 0,
-        ExpirationPeriod = 5.0
-    }
+-------------------------------------------------- CONFIG SAVE SYSTEM
+local FILE = "MerebennieHub_V1.5.json"
+local Config = {}
+
+local function loadConfig()
+    if not (readfile and isfile) then log("readfile/isfile unavailable - config disabled") return end
+    local ok, data = pcall(function()
+        if isfile(FILE) then return HttpService:JSONDecode(readfile(FILE)) end
+    end)
+    if ok and type(data) == "table" then Config = data log("Config loaded") else log("No config found, using defaults") end
+end
+
+local saveQueued = false
+local function save()
+    if saveQueued or not writefile then return end
+    saveQueued = true
+    task.delay(0.6, function()
+        saveQueued = false
+        local ok, err = pcall(function() writefile(FILE, HttpService:JSONEncode(Config)) end)
+        if not ok then log("Save failed:", err) end
+    end)
+end
+
+local function cfg(flag, default)
+    local v = Config[flag]
+    if v == nil then return default end
+    return v
+end
+
+local function getKey(flag, default)
+    local ok, kc = pcall(function() return Enum.KeyCode[cfg(flag, default)] end)
+    return ok and kc or Enum.KeyCode[default]
+end
+
+loadConfig()
+
+-------------------------------------------------- CONNECTION / CLEANUP TRACKING
+local Conns, Alive = {}, true
+local function track(c) Conns[#Conns + 1] = c return c end
+local cleanupFns = {}
+
+-------------------------------------------------- HELPERS
+local TAU = math.pi * 2
+local function flat(v) return Vector3.new(v.X, 0, v.Z) end
+local function unit(v) local m = v.Magnitude if m < 1e-4 then return nil end return v / m end
+local function rotY(v, ang) return CFrame.Angles(0, ang, 0):VectorToWorldSpace(v) end
+local function ease(a) return TweenService:GetValue(math.clamp(a, 0, 1), Enum.EasingStyle.Quart, Enum.EasingDirection.Out) end
+
+local function getChar()
+    local c = lp.Character
+    if not c then return end
+    local r = c:FindFirstChild("HumanoidRootPart")
+    local h = c:FindFirstChildOfClass("Humanoid")
+    if r and h and h.Health > 0 then return c, r, h end
+end
+
+local function nearestEnemy(range)
+    local _, root = getChar()
+    if not root then return end
+    local best, bestD, bestP, bestH = nil, range or math.huge, nil, nil
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= lp and p.Character then
+            local r = p.Character:FindFirstChild("HumanoidRootPart")
+            local h = p.Character:FindFirstChildOfClass("Humanoid")
+            if r and h and h.Health > 0 then
+                local d = (r.Position - root.Position).Magnitude
+                if d < bestD then best, bestD, bestP, bestH = r, d, p, h end
+            end
+        end
+    end
+    return best, bestH, bestP, bestD
+end
+
+local function sendKey(kc, down)
+    if VIM then pcall(function() VIM:SendKeyEvent(down, kc, false, game) end) end
+end
+local function tapKey(kc, hold)
+    sendKey(kc, true) task.wait(hold or 0.05) sendKey(kc, false)
+end
+local function click()
+    if not VIM then return end
+    pcall(function()
+        local s = workspace.CurrentCamera.ViewportSize
+        VIM:SendMouseButtonEvent(s.X / 2, s.Y / 2, 0, true, game, 0)
+        task.wait(0.03)
+        VIM:SendMouseButtonEvent(s.X / 2, s.Y / 2, 0, false, game, 0)
+    end)
+end
+
+-------------------------------------------------- GAME INPUT (touch-safe)
+-- IMPORTANT: on phones/tablets this script NEVER injects keyboard/mouse events.
+-- Doing so makes Roblox switch to the keyboard scheme and hide the mobile thumbstick/jump buttons.
+-- Instead, moves / M1 / block are triggered by pressing the game's own on-screen buttons (set once in Main > Mobile Setup).
+local PlayerGui = lp:WaitForChild("PlayerGui")
+local CalObj, touchIds, warned = {}, {}, {}
+local CAL_LIST = {
+    {"block", "Block"}, {"m1", "M1 / Attack"},
+    {"move1", "Move 1"}, {"move2", "Move 2"}, {"move3", "Move 3"}, {"move4", "Move 4"},
 }
 
--- Deep copy table generator
-local function InitializeDeepCopy(sourceTable)
-    local targetTable = {}
-    for key, value in pairs(sourceTable) do
-        if type(value) == "table" then
-            targetTable[key] = InitializeDeepCopy(value)
+local function pathToObj(path)
+    local cur = game
+    for part in string.gmatch(path, "[^%.]+") do
+        cur = cur and cur:FindFirstChild(part)
+        if not cur then return end
+    end
+    return cur
+end
+local function calObj(name)
+    local o = CalObj[name]
+    if o and o.Parent then return o end
+    local p = cfg("cal_" .. name .. "_path", "")
+    if p ~= "" then
+        o = pathToObj(p)
+        if o then CalObj[name] = o return o end
+    end
+end
+local function calPoint(name)
+    local fx, fy = Config["cal_" .. name .. "_x"], Config["cal_" .. name .. "_y"]
+    if fx and fy then
+        local vp = workspace.CurrentCamera.ViewportSize
+        return fx * vp.X, fy * vp.Y
+    end
+end
+local function isCalibrated(name) return (calObj(name) ~= nil) or (calPoint(name) ~= nil) end
+
+local function fire(btn, sig)
+    if not (btn and firesignal) then return false end
+    return pcall(function() firesignal(btn[sig]) end)
+end
+local function guiDown(name)
+    local b = calObj(name)
+    if b and fire(b, "MouseButton1Down") then return true end
+    local x, y = calPoint(name)
+    if x and VIM then
+        local id = 7000 + math.random(1, 900)
+        if pcall(function() VIM:SendTouchEvent(id, 0, x, y) end) then touchIds[name] = id return true end
+    end
+    return false
+end
+local function guiUp(name)
+    local b = calObj(name)
+    if b and fire(b, "MouseButton1Up") then
+        fire(b, "MouseButton1Click")
+        fire(b, "Activated")
+        return
+    end
+    local id = touchIds[name]
+    local x, y = calPoint(name)
+    if id and x then
+        pcall(function() VIM:SendTouchEvent(id, 2, x, y) end)
+        touchIds[name] = nil
+    end
+end
+local function viaGui(name, hold)
+    if not isCalibrated(name) then return false end
+    guiDown(name)
+    task.wait(hold or 0.04)
+    guiUp(name)
+    return true
+end
+local function noCal(name)
+    if not warned[name] then
+        warned[name] = true
+        log("Touch device: set the '" .. name .. "' button in Main > Mobile Setup (keys are never injected on touch)")
+    end
+end
+local function keysAllowed() return (not IS_TOUCH) or HAS_KB end
+
+local MOVE_KEYS = {Enum.KeyCode.One, Enum.KeyCode.Two, Enum.KeyCode.Three, Enum.KeyCode.Four}
+local function pressSlot(n)
+    n = math.clamp(math.floor(n or 0), 0, 4)
+    if n == 0 then return end
+    if viaGui("move" .. n, 0.04) then return end
+    if keysAllowed() then tapKey(MOVE_KEYS[n], 0.05) else noCal("move" .. n) end
+end
+local function doM1()
+    if viaGui("m1", 0.04) then return end
+    if keysAllowed() then click() else noCal("m1") end
+end
+local function blockDown()
+    if isCalibrated("block") then guiDown("block")
+    elseif keysAllowed() then sendKey(getKey("ab_key", "F"), true)
+    else noCal("block") end
+end
+local function blockUp()
+    if isCalibrated("block") then guiUp("block")
+    elseif keysAllowed() then sendKey(getKey("ab_key", "F"), false) end
+end
+
+-- Calibration: user taps the game's real button once; we remember the GUI object (and its screen position as fallback)
+local isOverOwnUI = function() return false end -- replaced after the GUI exists
+local calConn
+local function cancelCapture() if calConn then calConn:Disconnect() calConn = nil end end
+local function captureCalibration(name, done)
+    cancelCapture()
+    calConn = UIS.InputBegan:Connect(function(i)
+        if i.UserInputType ~= Enum.UserInputType.Touch and i.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+        local p = i.Position
+        if isOverOwnUI(p) then return end
+        cancelCapture()
+        local objs = PlayerGui:GetGuiObjectsAtPosition(p.X, p.Y)
+        local pick
+        for _, o in ipairs(objs) do if o:IsA("GuiButton") then pick = o break end end
+        if not pick then
+            for _, o in ipairs(objs) do
+                local a = o:FindFirstAncestorWhichIsA("GuiButton")
+                if a then pick = a break end
+            end
+        end
+        pick = pick or objs[1]
+        local vp = workspace.CurrentCamera.ViewportSize
+        CalObj[name] = pick
+        Config["cal_" .. name .. "_path"] = pick and pick:GetFullName() or ""
+        Config["cal_" .. name .. "_x"] = p.X / vp.X
+        Config["cal_" .. name .. "_y"] = p.Y / vp.Y
+        save()
+        log("Calibrated " .. name .. " -> " .. (pick and pick:GetFullName() or "screen position only"))
+        done(pick)
+    end)
+end
+
+-- Keep the Roblox mobile controls (thumbstick / jump) from being hidden while the hub runs
+local tgOrig
+local function guardTouch()
+    if not IS_TOUCH or not cfg("keep_touch", true) then return end
+    local tg = PlayerGui:FindFirstChild("TouchGui")
+    if not tg then return end
+    if tgOrig == nil then tgOrig = tg.Enabled end
+    if tgOrig and not tg.Enabled then tg.Enabled = true end
+    local f = tg:FindFirstChild("TouchControlFrame")
+    if f and tgOrig and not f.Visible then f.Visible = true end
+end
+
+-------------------------------------------------- MOTION ENGINE
+-- Smooth velocity-driven movement. Rotates ONLY the character root, never the camera.
+local Busy = false
+local function motion(duration, velFn, faceFn, turnRate)
+    local _, root, hum = getChar()
+    if not root or Busy then return end
+    Busy = true
+    local prevAuto = hum.AutoRotate
+    hum.AutoRotate = false
+    local t = 0
+    local ok, err = pcall(function()
+        while t < duration and Alive do
+            local dt = RunService.Heartbeat:Wait()
+            t += dt
+            if not root.Parent or hum.Health <= 0 then break end
+            local a = math.clamp(t / duration, 0, 1)
+            local v, y = velFn(a, dt)
+            if v == false then break end
+            if v then
+                local cur = root.AssemblyLinearVelocity
+                root.AssemblyLinearVelocity = Vector3.new(v.X, y or cur.Y, v.Z)
+            end
+            if faceFn then
+                local look = faceFn(a)
+                if look and flat(look).Magnitude > 0.001 then
+                    local goal = CFrame.lookAt(root.Position, root.Position + flat(look))
+                    root.CFrame = root.CFrame:Lerp(goal, math.clamp(dt * (turnRate or 25), 0, 1))
+                end
+            end
+        end
+    end)
+    pcall(function() hum.AutoRotate = prevAuto end)
+    Busy = false
+    if not ok then log("Motion error:", err) end
+end
+
+local function nearestEnemyRange() return nearestEnemy(cfg("t_range", 45)) end
+local function predict(tr, t) return tr.Position + flat(tr.AssemblyLinearVelocity) * t end
+local function pingSec()
+    local ok, p = pcall(function() return lp:GetNetworkPing() end)
+    return (ok and tonumber(p)) or 0.05
+end
+
+local function aimDir(root, hum)
+    local tgt = nearestEnemyRange()
+    local d
+    if tgt then d = unit(flat(tgt.Position - root.Position)) end
+    if not d then d = unit(flat(hum.MoveDirection)) end
+    if not d then d = unit(flat(root.CFrame.LookVector)) end
+    return d or Vector3.new(0, 0, -1), tgt
+end
+
+local function moveInput()
+    local _, _, hum = getChar()
+    local cam = workspace.CurrentCamera
+    if not hum or not cam then return 0, 0 end
+    local md = hum.MoveDirection
+    if md.Magnitude < 0.2 then return 0, 0 end
+    local r = unit(flat(cam.CFrame.RightVector)) or Vector3.xAxis
+    local f = unit(flat(cam.CFrame.LookVector)) or -Vector3.zAxis
+    return md:Dot(r), md:Dot(f) -- camera is only READ here
+end
+local function sideSign()
+    local x, f = moveInput()
+    if math.abs(x) > 0.45 and math.abs(x) >= math.abs(f) * 0.6 then return x > 0 and 1 or -1 end
+    return nil
+end
+local function backHeld()
+    local x, f = moveInput()
+    return f < -0.5 and math.abs(x) < 0.5
+end
+
+-- Dash straight along a direction (no target)
+local function dashDir(d, power, dur)
+    motion(dur, function(a) return d * power * (1 - a) ^ 1.3 end, function() return d end, 60)
+end
+-- Short step away from the target (ping compensation for twisted-style techs)
+local function backstep(studs, dur)
+    local _, root = getChar()
+    local tgt = nearestEnemyRange()
+    if not root then return end
+    local away = tgt and unit(flat(root.Position - tgt.Position)) or unit(flat(-root.CFrame.LookVector))
+    if not away then return end
+    motion(dur, function() return away * (studs / dur) end, function()
+        if tgt and tgt.Parent then return tgt.Position - root.Position end
+        return -away
+    end, 80)
+end
+-- Dash INTO a target and stop at hit range (the core of every extender tech)
+local function chase(tgt, o)
+    local _, root = getChar()
+    if not root or not tgt then return end
+    local stop = o.stop or 3
+    motion(o.dur or 0.35, function(a, dt)
+        if not tgt.Parent then return false end
+        local off = flat(predict(tgt, o.lead or 0.1) - root.Position)
+        local d = off.Magnitude
+        if d <= stop then return false end
+        local sp = math.min(o.power or 60, (d - stop) / math.max(dt, 1 / 90)) * math.min(1, 0.45 + a * 8)
+        return off.Unit * sp
+    end, function() return flat(tgt.Position - root.Position) end, 90)
+end
+
+-- Arc around a target. flank=true sweeps to the target's BACK (blind spot), otherwise sweeps `sign` direction
+local lastSide = 1
+local function orbit(tgt, sign, arcDeg, dur, flank)
+    local _, root = getChar()
+    if not root or not tgt or not tgt.Parent then return end
+    local rel = flat(root.Position - tgt.Position)
+    local r = math.clamp(rel.Magnitude, 3.5, 8)
+    local ang0 = math.atan2(rel.Z, rel.X)
+    local maxA = math.rad(arcDeg)
+    local sweep
+    if flank then
+        local tl = flat(tgt.CFrame.LookVector)
+        local behind = math.atan2(-tl.Z, -tl.X)
+        local delta = (behind - ang0 + math.pi) % TAU - math.pi
+        if math.abs(delta) < math.rad(8) then
+            sweep = 0
+        elseif sign and math.abs(delta) > math.rad(150) then
+            sweep = maxA * sign * (-1) -- directly in front: go the way the player pushes
+            local tangent = Vector3.new(-math.sin(ang0), 0, math.cos(ang0))
+            local toT = unit(-rel) or Vector3.new(0, 0, -1)
+            local wanted = Vector3.new(-toT.Z, 0, toT.X) * sign
+            sweep = maxA * (tangent:Dot(wanted) >= 0 and 1 or -1)
         else
-            targetTable[key] = value
+            sweep = math.clamp(delta, -maxA, maxA)
         end
+    else
+        local tangent = Vector3.new(-math.sin(ang0), 0, math.cos(ang0))
+        local toT = unit(-rel) or Vector3.new(0, 0, -1)
+        local wanted = Vector3.new(-toT.Z, 0, toT.X) * (sign or 1)
+        sweep = maxA * (tangent:Dot(wanted) >= 0 and 1 or -1)
     end
-    return targetTable
+    motion(dur, function(a, dt)
+        if not tgt.Parent then return false end
+        local ang = ang0 + sweep * ease(a)
+        local goal = tgt.Position + Vector3.new(math.cos(ang), 0, math.sin(ang)) * r
+        local v = flat(goal - root.Position) / math.max(dt, 1 / 120)
+        if v.Magnitude > 95 then v = v.Unit * 95 end
+        return v
+    end, function() if tgt.Parent then return tgt.Position - root.Position end end, 45)
 end
 
-SystemRegistry.Storage.ActiveCache = InitializeDeepCopy(SystemRegistry.Storage.DefaultState)
-
-local function SaveSystemConfiguration()
-    if writefile then
-        local success, serializedData = pcall(function()
-            return HttpService:JSONEncode(SystemRegistry.Storage.ActiveCache)
-        end)
-        if success and serializedData then
-            pcall(function()
-                writefile(SystemRegistry.Storage.FileName, serializedData)
-            end)
-        end
+-------------------------------------------------- TECHS (researched definitions)
+-- Instant Twisted (Hero Hunter / Garou "Twisted Dash"): right after the 4th M1 launches the target, dash into them
+-- immediately so they take less knockback and you can extend. The "instant" part (normally done by whipping the camera)
+-- is done here by pivoting the CHARACTER, so the camera stays free.
+local function instantTwisted(o)
+    o = o or {}
+    local _, root, hum = getChar() if not root then return end
+    local tgt = nearestEnemyRange()
+    if tgt then
+        local f = flat(tgt.Position - root.Position)
+        if f.Magnitude > 0.1 then root.CFrame = CFrame.lookAt(root.Position, root.Position + f) end
     end
+    local back = o.back or cfg("tw_back", 0)
+    if back > 0.05 then backstep(back, 0.09) end
+    local power = cfg("t_power", 60) * (o.power or 1.2)
+    if tgt then
+        chase(tgt, {power = power, dur = 0.32, stop = cfg("tw_stop", 2.6), lead = o.lead or 0.12})
+    else
+        local d = aimDir(root, hum)
+        dashDir(d, power, 0.26)
+    end
+    if o.m1 or cfg("tw_m1", false) then doM1() end
+end
+local function boomyTwisted() instantTwisted({power = 1.6, lead = 0.15, m1 = true}) end
+local function boomyTwistedRW() -- ping-aware: higher ping => bigger step back and more lead
+    local ping = pingSec()
+    instantTwisted({power = 1.7, back = math.clamp(ping * 1000 / 30, 0, 4), lead = ping + 0.06, m1 = true})
 end
 
-local function LoadSystemConfiguration()
-    if readfile and isfile and isfile(SystemRegistry.Storage.FileName) then
-        local success, fileContents = pcall(function()
-            return readfile(SystemRegistry.Storage.FileName)
+-- Supa Tech: uppercut -> dash extender (dash instead of grasp/skill) so you stay glued to a launched target
+local function supaHits()
+    for _ = 1, cfg("supa_hits", 1) do doM1() task.wait(0.12) end
+end
+local function supaV2()
+    local _, root, hum = getChar() if not root then return end
+    local tgt = nearestEnemyRange()
+    local p = cfg("t_power", 60) * 1.3
+    if tgt then chase(tgt, {power = p, dur = 0.3, stop = 2.2, lead = 0.2}) else dashDir(aimDir(root, hum), p, 0.28) end
+    supaHits()
+end
+local function supaV3() -- arcs to the target's back first, then closes in
+    local _, root = getChar() if not root then return end
+    local tgt = nearestEnemyRange()
+    if not tgt then return supaV2() end
+    orbit(tgt, sideSign(), 75, 0.24, true)
+    chase(tgt, {power = cfg("t_power", 60), dur = 0.2, stop = 2.2, lead = 0.1})
+    supaHits()
+end
+
+-- Side Dash (Q + A/D): fast lateral evasive dash. Side Dash Cancel = use a move mid-dash so the dash ends early.
+local function sideDashV3()
+    local _, root, hum = getChar() if not root then return end
+    local d, tgt = aimDir(root, hum)
+    local s = sideSign() or -lastSide
+    lastSide = s
+    local right = Vector3.new(-d.Z, 0, d.X) * s
+    local p = cfg("t_power", 60) * 1.5
+    local slot = cfg("sd_cancel", 0)
+    local delay = cfg("sd_delay", 0.08)
+    if slot > 0 then task.delay(delay, function() pressSlot(slot) end) end
+    motion(slot > 0 and (delay + 0.05) or 0.22, function(a) return (right + d * 0.2) * p * (1 - a) ^ 1.2 end,
+        function() if tgt and tgt.Parent then return tgt.Position - root.Position end return d end, 60)
+end
+
+-- Side Dash Assist V2: orbit to the target's blind spot (behind) while facing them
+local function sideDashAssist()
+    local tgt = nearestEnemy(cfg("sda_range", 30))
+    if not tgt then return end
+    local s = sideSign() or -lastSide
+    lastSide = s
+    orbit(tgt, s, cfg("sda_arc", 110), cfg("sda_dur", 0.32), cfg("sda_flank", true))
+end
+
+-- Liz Tech (unverified community name): hop-dash with a flick pivot
+local function lizTech()
+    local _, root, hum = getChar() if not root then return end
+    local d = aimDir(root, hum)
+    local p = cfg("t_power", 60) * 0.9
+    motion(0.45, function(a)
+        local y = a < 0.5 and 30 * (1 - a * 2) or nil
+        return d * p * (1 - a * 0.5), y
+    end, function(a)
+        if a < 0.5 then return rotY(d, math.pi * ease(a * 2)) end
+        return rotY(d, math.pi * (1 - ease((a - 0.5) * 2)))
+    end, 70)
+end
+
+-- Back Dash Cancel (Q + S): fire a move mid-backdash to cancel it into a surprise attack
+local function backDashCancel()
+    task.wait(cfg("bdc_delay", 0.12))
+    local _, root, hum = getChar() if not root then return end
+    pcall(function()
+        local an = hum:FindFirstChildOfClass("Animator")
+        if an then
+            for _, tr in ipairs(an:GetPlayingAnimationTracks()) do
+                local n = ((tr.Name or "") .. " " .. (tr.Animation and tr.Animation.Name or "")):lower()
+                if n:find("dash") or n:find("back") or n:find("roll") or n:find("tumble") then tr:Stop(0.05) end
+            end
+        end
+    end)
+    Busy = false
+    local v = root.AssemblyLinearVelocity
+    root.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)
+    local slot = cfg("bdc_slot", 0)
+    if slot > 0 then pressSlot(slot) end
+    local tgt = nearestEnemyRange()
+    if tgt then chase(tgt, {power = cfg("t_power", 60) * 0.7, dur = 0.16, stop = 3, lead = 0.1}) end
+end
+
+-- Floater (juggle loop): keep a launched enemy floating by staying glued to them with short R-pattern side dashes + hits
+local FL = {run = false}
+local function floaterToggle()
+    if not cfg("t_floater", false) then return end
+    if FL.run then FL.run = false log("Floater loop stopped") return end
+    FL.run = true
+    log("Floater loop started")
+    task.spawn(function()
+        local side, t0 = 1, os.clock()
+        while FL.run and Alive and cfg("t_floater", false) and os.clock() - t0 < cfg("fl_time", 10) do
+            local _, root = getChar()
+            if not root then break end
+            local tgt, ehum = nearestEnemy(cfg("fl_range", 35))
+            local airborne = ehum and ehum.FloorMaterial == Enum.Material.Air
+            if tgt and (airborne or not cfg("fl_aironly", true)) then
+                local want = cfg("fl_dist", 3)
+                if flat(tgt.Position - root.Position).Magnitude > want + 2.5 then
+                    chase(tgt, {power = cfg("t_power", 60), dur = 0.2, stop = want, lead = 0.15})
+                end
+                orbit(tgt, side, cfg("fl_arc", 70), 0.2, false)
+                side = -side
+                if cfg("fl_hit", true) then
+                    if cfg("fl_uppercut", false) then pressSlot(cfg("fl_slot", 4)) else doM1() end
+                end
+                task.wait(cfg("fl_gap", 0.1))
+            else
+                task.wait(0.1)
+            end
+        end
+        FL.run = false
+    end)
+end
+
+-- Longslam V3: hop-dash toward the target and M1 on the way down (downslam from long range)
+local function longslam()
+    local _, root, hum = getChar() if not root then return end
+    local d, tgt = aimDir(root, hum)
+    local p = cfg("t_power", 60) * cfg("ls_reach", 1.2)
+    task.delay(cfg("ls_delay", 0.22), doM1)
+    motion(0.45, function(a)
+        local dir = d
+        if tgt and tgt.Parent then
+            local off = flat(predict(tgt, 0.15) - root.Position)
+            if off.Magnitude < 3 then return Vector3.zero, a < 0.08 and 38 or nil end
+            dir = off.Unit
+        end
+        return dir * p * (1 - a * 0.6), a < 0.08 and 38 or nil
+    end, function() return tgt and tgt.Parent and (tgt.Position - root.Position) or d end, 60)
+end
+
+-- Oreo ("sandwich", interpretation): hits from the front, flank to the back, hits again, then cancel with a move
+local MacroBusy = false
+local function oreo()
+    if MacroBusy then return end
+    MacroBusy = true
+    pcall(function()
+        local tgt = nearestEnemyRange()
+        if not tgt then return end
+        chase(tgt, {power = cfg("t_power", 60) * 0.9, dur = 0.22, stop = 2.6, lead = 0.1})
+        for _ = 1, cfg("oreo_hits", 3) do doM1() task.wait(0.11) end
+        orbit(tgt, sideSign() or lastSide, cfg("sda_arc", 110), 0.28, true)
+        for _ = 1, cfg("oreo_hits", 3) do doM1() task.wait(0.11) end
+        pressSlot(cfg("oreo_slot", 3))
+    end)
+    MacroBusy = false
+end
+
+-- Auto-Kyoto (Garou): Flowing Water -> side dash / back dash cancel ASAP -> Lethal Whirlwind Stream
+local KyRun = false
+local function kyoto()
+    if KyRun then KyRun = false log("Auto-Kyoto stopped") return end
+    if MacroBusy then return end
+    KyRun, MacroBusy = true, true
+    task.spawn(function()
+        pcall(function()
+            local loops = 0
+            while KyRun and Alive and cfg("ky_on", false) and loops < cfg("ky_loops", 3) do
+                loops += 1
+                local tgt = nearestEnemyRange()
+                if not tgt then break end
+                if cfg("ky_m1", false) then for _ = 1, 3 do doM1() task.wait(0.1) end end
+                pressSlot(cfg("ky_a", 1))                   -- Flowing Water
+                task.wait(cfg("ky_wait", 0.5))
+                if cfg("ky_back", false) then               -- back dash cancel variant
+                    backstep(4, 0.12)
+                else
+                    orbit(tgt, -lastSide, 80, 0.2, false)    -- side dash cancel
+                    lastSide = -lastSide
+                end
+                pressSlot(cfg("ky_b", 2))                   -- Lethal Whirlwind Stream
+                task.wait(cfg("ky_gap", 0.6))
+            end
         end)
-        if success and fileContents then
-            local parsingSuccess, parsedTable = pcall(function()
-                return HttpService:JSONDecode(fileContents)
-            end)
-            if parsingSuccess and type(parsedTable) == "table" then
-                for optionKey, valueData in pairs(parsedTable) do
-                    if SystemRegistry.Storage.ActiveCache[optionKey] ~= nil then
-                        SystemRegistry.Storage.ActiveCache[optionKey] = valueData
+        KyRun, MacroBusy = false, false
+    end)
+end
+
+-- Dash detection for touch (the game's dash button can't be hooked, so we notice the speed spike)
+local lastSpeed, dashCd = 0, 0
+local function dashDetect(dt)
+    if not cfg("ad_on", IS_TOUCH) then return end
+    local _, root = getChar()
+    if not root then return end
+    local sp = flat(root.AssemblyLinearVelocity).Magnitude
+    dashCd -= dt
+    if sp > cfg("ad_speed", 45) and lastSpeed < 28 and dashCd <= 0 and not Busy and not MacroBusy then
+        dashCd = 0.6
+        if cfg("bdc_on", false) and backHeld() and not sideSign() then
+            task.spawn(function() pcall(backDashCancel) end)
+        elseif cfg("sda_on", false) and sideSign() then
+            task.spawn(function() task.wait(0.03) pcall(sideDashAssist) end)
+        end
+    end
+    lastSpeed = sp
+end
+
+-- Registry used for keybinds, the Techs tab and the mobile Action Pad
+local Entries = {
+    {name = "Instant Twisted", flag = "t_twisted", key = "k_twisted", dk = "T", fn = instantTwisted, tab = "techs",
+     desc = "Hero Hunter/Garou combo extender. After your 4th M1 launches the target, pivots your CHARACTER to them and dashes in so they take less knockback and you can keep comboing. Camera stays free."},
+    {name = "Supa V2", flag = "t_supa2", key = "k_supa2", dk = "Y", fn = supaV2, tab = "techs",
+     desc = "Uppercut dash extender (dash instead of a grasp/skill). Press right after your Uppercut: dashes to the launched target's predicted spot, stops at hit range, then auto-M1s."},
+    {name = "Supa V3", flag = "t_supa3", key = "k_supa3", dk = "U", fn = supaV3, tab = "techs",
+     desc = "Supa V2 plus a flank: arcs to the target's back first, then closes in. Better vs. targets that are rolling."},
+    {name = "Side Dash V3", flag = "t_side3", key = "k_side3", dk = "G", fn = sideDashV3, tab = "techs",
+     desc = "Sharp side-evasion dash that keeps you facing the target. Optional Side Dash Cancel: fires a move mid-dash to cut the dash short."},
+    {name = "Liz Tech (REWORKED)", flag = "t_liz", key = "k_liz", dk = "H", fn = lizTech, tab = "techs",
+     desc = "I couldn't find a public definition for this one, so it's a hop-dash with a flick pivot for dodging/baiting. Tune power below."},
+    {name = "BOOMY Instant Twisted", flag = "t_boomy", key = "k_boomy", dk = "J", fn = boomyTwisted, tab = "techs",
+     desc = "Faster, harder Instant Twisted: bigger dash power, more target lead, auto M1 on landing."},
+    {name = "BOOMY Instant Twisted [REWORKED]", flag = "t_boomy2", key = "k_boomy2", dk = "K", fn = boomyTwistedRW, tab = "techs",
+     desc = "Ping-aware Twisted: higher ping means a bigger step back and more dash lead (matches how players tune it), then dash + auto M1."},
+    {name = "Floater Tech", flag = "t_floater", key = "fl_key", dk = "V", fn = floaterToggle, tab = "techs",
+     desc = "Keeps a LAUNCHED enemy floating. Press once to start/stop the loop: you stay glued under them with short R-pattern side dashes, facing them, auto-hitting."},
+    {name = "Side Dash Assist V2", flag = "sda_on", fn = sideDashAssist, tab = "hook"},
+    {name = "Back Dash Cancel", flag = "bdc_on", fn = backDashCancel, tab = "hook"},
+    {name = "Longslam V3", flag = "ls_on", key = "ls_key", dk = "Z", fn = longslam, tab = "own"},
+    {name = "Oreo", flag = "oreo_on", key = "oreo_key", dk = "X", fn = oreo, tab = "own"},
+    {name = "Auto-Kyoto V3", flag = "ky_on", key = "ky_key", dk = "C", fn = kyoto, tab = "own"},
+}
+
+-------------------------------------------------- AUTO BLOCK (360)
+local blocking = false
+local function doBlock()
+    if blocking then return end
+    blocking = true
+    task.spawn(function()
+        pcall(blockDown)
+        task.wait(cfg("ab_hold", 0.35))
+        pcall(blockUp)
+        task.wait(cfg("ab_cd", 0.1))
+        blocking = false
+    end)
+end
+
+local ACTION = {
+    [Enum.AnimationPriority.Action] = true, [Enum.AnimationPriority.Action2] = true,
+    [Enum.AnimationPriority.Action3] = true, [Enum.AnimationPriority.Action4] = true,
+}
+
+local function autoBlockStep()
+    if not cfg("ab_on", false) or blocking then return end
+    if IS_TOUCH and not HAS_KB and not isCalibrated("block") then noCal("block") return end
+    local _, root = getChar()
+    if not root then return end
+    local radius, speedThr = cfg("ab_radius", 18), cfg("ab_speed", 28)
+    for _, p in ipairs(Players:GetPlayers()) do
+        local ch = p ~= lp and p.Character
+        local er = ch and ch:FindFirstChild("HumanoidRootPart")
+        local eh = ch and ch:FindFirstChildOfClass("Humanoid")
+        if er and eh and eh.Health > 0 then
+            local off = root.Position - er.Position
+            local dist = off.Magnitude
+            if dist <= radius then -- full 360: no facing/angle restriction
+                local closing = er.AssemblyLinearVelocity:Dot(off / math.max(dist, 0.01))
+                if closing > speedThr then doBlock() return end
+                if cfg("ab_anim", true) and dist <= radius * 0.8 then
+                    local an = eh:FindFirstChildOfClass("Animator")
+                    if an then
+                        for _, tr in ipairs(an:GetPlayingAnimationTracks()) do
+                            if ACTION[tr.Priority] and tr.TimePosition < 0.4 then doBlock() return end
+                        end
                     end
                 end
             end
         end
     end
 end
-LoadSystemConfiguration()
 
---===================================================================================--
--- LAYER 2: SYSTEM CRITICAL TOUCHGUI INTERACTION PROTECTION
---===================================================================================--
-local function ProcessTouchGuiValidation()
-    local executionStatus, executionError = pcall(function()
-        local touchGuiInstance = PlayerGui:FindFirstChild("TouchGui")
-        if touchGuiInstance then
-            if touchGuiInstance:IsA("ScreenGui") and not touchGuiInstance.Enabled then
-                touchGuiInstance.Enabled = true
-            end
-        end
-    end)
-    if not executionStatus and executionError then
-        warn("[MEREBENNIE CRITICAL ERROR]: TouchGui validation fault reported: " .. tostring(executionError))
-    end
-end
-
-task.spawn(function()
-    while _G.MerebennieHubLoaded do
-        task.wait(0.5)
-        ProcessTouchGuiValidation()
-    end
-end)
-
---===================================================================================--
--- LAYER 3: CORE RAYCASTING AND VECTOR MATHEMATICS ENGINE
---===================================================================================--
-local AdvancedMathModule = {}
-
-function AdvancedMathModule.GetFlatVectorDistance(vectorA, vectorB)
-    return math.sqrt((vectorA.X - vectorB.X)^2 + (vectorA.Z - vectorB.Z)^2)
-end
-
-function AdvancedMathModule.ComputeOrbitCFrame(pivotPoint, referenceCFrame, lateralOffset, depthOffset)
-    local lateralStep = referenceCFrame.RightVector * lateralOffset
-    local depthStep = referenceCFrame.LookVector * depthOffset
-    local finalComputedPosition = referenceCFrame.Position + lateralStep + depthStep
-    return CFrame.new(finalComputedPosition, Vector3.new(pivotPoint.X, referenceCFrame.Position.Y, pivotPoint.Z))
-end
-
-function AdvancedMathModule.ScanTerrainClearance(characterModel)
-    local rootPart = characterModel:FindFirstChild("HumanoidRootPart")
-    if not rootPart then return nil end
-    
-    local nativeRaycastParams = RaycastParams.new()
-    nativeRaycastParams.FilterDescendantsInstances = {characterModel}
-    nativeRaycastParams.FilterType = Enum.RaycastFilterType.Exclude
-    nativeRaycastParams.IgnoreWater = true
-    
-    local calculationResult = workspace:Raycast(rootPart.Position, Vector3.new(0, -100, 0), nativeRaycastParams)
-    return calculationResult
-end
-
---===================================================================================--
--- LAYER 4: TARGETING LOGIC AND PROXIMITY INDEX ARRAYS
---===================================================================================--
-local function FetchOptimalProximityTarget(maximumStudRange)
-    local userCharacter = LocalPlayer.Character
-    local userRootPart = userCharacter and userCharacter:FindFirstChild("HumanoidRootPart")
-    if not userRootPart then return nil end
-    
-    local verifiedTarget = nil
-    local minimumDistanceFound = maximumStudRange
-    
-    local systemPlayersList = Players:GetPlayers()
-    for index = 1, #systemPlayersList do
-        local targetPlayer = systemPlayersList[index]
-        if targetPlayer ~= LocalPlayer and targetPlayer.Character then
-            local enemyRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-            local enemyHumanoid = targetPlayer.Character:FindFirstChild("Humanoid")
-            if enemyRoot and enemyHumanoid and enemyHumanoid.Health > 0 then
-                local computedDistance = (userRootPart.Position - enemyRoot.Position).Magnitude
-                if computedDistance < minimumDistanceFound then
-                    minimumDistanceFound = computedDistance
-                    verifiedTarget = targetPlayer.Character
+-------------------------------------------------- VISUALS / OPTIMIZATION / COLOR
+local function espStep()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= lp and p.Character then
+            local h = p.Character:FindFirstChild("MBHub_ESP")
+            if cfg("v_esp", false) then
+                if not h then
+                    h = Instance.new("Highlight")
+                    h.Name = "MBHub_ESP"
+                    h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                    h.OutlineColor = Color3.fromRGB(190, 90, 255)
+                    h.FillColor = Color3.fromRGB(150, 50, 255)
+                    h.FillTransparency = 0.7
+                    h.Parent = p.Character
                 end
+            elseif h then h:Destroy() end
+        end
+    end
+end
+
+local fbOrig
+local function setFullbright(on)
+    if on then
+        fbOrig = fbOrig or {Lighting.Brightness, Lighting.ClockTime, Lighting.GlobalShadows, Lighting.Ambient}
+        Lighting.Brightness, Lighting.ClockTime, Lighting.GlobalShadows = 2, 14, false
+        Lighting.Ambient = Color3.fromRGB(170, 170, 170)
+    elseif fbOrig then
+        Lighting.Brightness, Lighting.ClockTime, Lighting.GlobalShadows, Lighting.Ambient = table.unpack(fbOrig)
+        fbOrig = nil
+    end
+end
+
+local CC = Instance.new("ColorCorrectionEffect")
+CC.Name = "MBHub_CC"
+CC.Enabled = false
+CC.Parent = Lighting
+local function applyCC()
+    CC.Enabled = cfg("cc_on", false)
+    CC.TintColor = Color3.fromRGB(cfg("cc_r", 255), cfg("cc_g", 255), cfg("cc_b", 255))
+    CC.Saturation = cfg("cc_sat", 0)
+    CC.Contrast = cfg("cc_con", 0)
+    CC.Brightness = cfg("cc_bri", 0)
+end
+
+local boosted, boostConn = {}, nil
+local function boostInst(i)
+    if i:IsA("ParticleEmitter") or i:IsA("Trail") or i:IsA("Beam") or i:IsA("Smoke") or i:IsA("Fire") or i:IsA("Sparkles") then
+        if i.Enabled then boosted[#boosted + 1] = i i.Enabled = false end
+    end
+end
+local function setBoost(on)
+    if on then
+        pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+        Lighting.GlobalShadows = false
+        for _, i in ipairs(workspace:GetDescendants()) do pcall(boostInst, i) end
+        boostConn = workspace.DescendantAdded:Connect(function(i) pcall(boostInst, i) end)
+        log("FPS boost applied")
+    else
+        if boostConn then boostConn:Disconnect() boostConn = nil end
+        for _, i in ipairs(boosted) do pcall(function() i.Enabled = true end) end
+        boosted = {}
+        Lighting.GlobalShadows = true
+    end
+end
+
+-------------------------------------------------- GUI LIBRARY
+local PURPLE, BG, PANEL, PANEL2 = Color3.fromRGB(170, 70, 255), Color3.fromRGB(14, 11, 21), Color3.fromRGB(23, 18, 34), Color3.fromRGB(30, 24, 45)
+local TEXT, DIM = Color3.fromRGB(235, 228, 250), Color3.fromRGB(150, 140, 175)
+local FONT, FONTB = Enum.Font.GothamMedium, Enum.Font.GothamBold
+
+local function mk(class, props, parent)
+    local i = Instance.new(class)
+    for k, v in pairs(props) do i[k] = v end
+    i.Parent = parent
+    return i
+end
+local function corner(o, r) mk("UICorner", {CornerRadius = UDim.new(0, r or 6)}, o) end
+local function stroke(o, c, t, tr) return mk("UIStroke", {Color = c, Thickness = t or 1, Transparency = tr or 0, ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, o) end
+local function tw(o, t, p) TweenService:Create(o, TweenInfo.new(t, Enum.EasingStyle.Quad), p):Play() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "MerebennieHub"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 5
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+if not pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end) then
+    gui.Parent = lp:WaitForChild("PlayerGui")
+end
+
+local function viewport()
+    local s = gui.AbsoluteSize
+    if s.X < 50 or s.Y < 50 then
+        local cam = workspace.CurrentCamera
+        s = cam and cam.ViewportSize or Vector2.new(800, 450)
+    end
+    return s
+end
+local function sizeOf(f)
+    local s = f.AbsoluteSize
+    if s.X < 1 then return Vector2.new(f.Size.X.Offset, f.Size.Y.Offset) end
+    return s
+end
+local function clampXY(x, y, size)
+    local vp = viewport()
+    return math.clamp(x, 0, math.max(0, vp.X - size.X)), math.clamp(y, 0, math.max(0, vp.Y - size.Y))
+end
+
+-- Generic drag helper: mouse + touch, stays on screen, tap (no movement) fires onTap
+local function makeDraggable(handle, target, onTap, fx, fy)
+    local dragging, moved, startIn, startPos
+    handle.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging, moved, startIn = true, false, i.Position
+            startPos = Vector2.new(target.AbsolutePosition.X, target.AbsolutePosition.Y)
+        end
+    end)
+    track(UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+            local d = i.Position - startIn
+            if d.Magnitude > 6 then moved = true end
+            if moved then
+                local x, y = clampXY(startPos.X + d.X, startPos.Y + d.Y, sizeOf(target))
+                target.Position = UDim2.fromOffset(x, y)
             end
         end
-    end
-    return verifiedTarget
-end
-
-local function RegisterCombatHitboxSignature(instantiatedChild)
-    local validationString = string.lower(instantiatedChild.Name)
-    if validationString:find("hit") or validationString:find("attack") or validationString:find("combo") or validationString:find("action") or validationString:find("swing") then
-        local foundCombatant = FetchOptimalProximityTarget(16)
-        if foundCombatant then
-            SystemRegistry.TargetingEngine.ActiveTarget = foundCombatant
-            SystemRegistry.TargetingEngine.LockTimestamp = tick()
+    end))
+    track(UIS.InputEnded:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            if moved then
+                if fx then Config[fx] = target.Position.X.Offset Config[fy] = target.Position.Y.Offset save() end
+            elseif onTap then
+                pcall(onTap)
+            end
         end
-    end
+    end))
 end
 
-local function AttachCombatListenersToCharacter(activeCharacter)
-    if not activeCharacter then return end
-    
-    local childAddedConnection = activeCharacter.ChildAdded:Connect(function(newObject)
-        RegisterCombatHitboxSignature(newObject)
+local main = mk("Frame", {Name = "Main", BackgroundColor3 = BG, BorderSizePixel = 0, Active = true}, gui)
+corner(main, 10)
+stroke(main, PURPLE, 2)
+mk("ImageLabel", {Name = "Glow", BackgroundTransparency = 1, Image = "rbxassetid://5028857084", ImageColor3 = PURPLE,
+    ImageTransparency = 0.55, ScaleType = Enum.ScaleType.Slice, SliceCenter = Rect.new(24, 24, 276, 276),
+    Size = UDim2.new(1, 50, 1, 50), Position = UDim2.fromOffset(-25, -25), ZIndex = 0}, main)
+
+local top = mk("Frame", {Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = PANEL, BorderSizePixel = 0, Active = true}, main)
+corner(top, 10)
+mk("Frame", {Size = UDim2.new(1, 0, 0, 10), Position = UDim2.new(0, 0, 1, -10), BackgroundColor3 = PANEL, BorderSizePixel = 0}, top)
+mk("TextLabel", {Text = "Merebennie Hub V1.5", Font = FONTB, TextSize = 16, TextColor3 = PURPLE, BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(14, 0), Size = UDim2.new(0.5, 0, 1, 0), TextXAlignment = Enum.TextXAlignment.Left}, top)
+local subtitle = mk("TextLabel", {Text = "The Strongest Battlegrounds", Font = FONT, TextSize = 11, TextColor3 = DIM, BackgroundTransparency = 1,
+    Position = UDim2.new(1, -250, 0, 0), Size = UDim2.fromOffset(200, 38), TextXAlignment = Enum.TextXAlignment.Right}, top)
+local minBtn = mk("TextButton", {Text = "–", Font = FONTB, TextSize = 22, TextColor3 = TEXT, BackgroundTransparency = 1,
+    Size = UDim2.fromOffset(46, 38), Position = UDim2.new(1, -46, 0, 0)}, top)
+
+local sidebar = mk("ScrollingFrame", {Position = UDim2.fromOffset(8, 46), Size = UDim2.new(0, 150, 1, -54), BackgroundColor3 = PANEL,
+    BorderSizePixel = 0, ScrollBarThickness = 2, ScrollBarImageColor3 = PURPLE, CanvasSize = UDim2.new(),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y}, main)
+corner(sidebar, 8)
+mk("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, sidebar)
+mk("UIPadding", {PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5), PaddingBottom = UDim.new(0, 6)}, sidebar)
+
+local content = mk("Frame", {Position = UDim2.fromOffset(166, 46), Size = UDim2.new(1, -174, 1, -54), BackgroundTransparency = 1}, main)
+
+-- Fit the window to any screen (phones included) and keep it on-screen
+local function layoutMain(keepPos)
+    local vp = viewport()
+    local w, h = math.min(640, vp.X - 16), math.min(410, vp.Y - 16)
+    main.Size = UDim2.fromOffset(w, h)
+    local sbw = w < 560 and 112 or 150
+    sidebar.Size = UDim2.new(0, sbw, 1, -54)
+    content.Position = UDim2.fromOffset(sbw + 16, 46)
+    content.Size = UDim2.new(1, -(sbw + 24), 1, -54)
+    subtitle.Visible = w >= 540
+    local cx, cy
+    if keepPos then
+        cx, cy = main.Position.X.Offset, main.Position.Y.Offset
+    else
+        cx, cy = cfg("win_x", (vp.X - w) / 2), cfg("win_y", (vp.Y - h) / 2)
+    end
+    local x, y = clampXY(cx, cy, Vector2.new(w, h))
+    main.Position = UDim2.fromOffset(x, y)
+end
+layoutMain(false)
+makeDraggable(top, main, nil, "win_x", "win_y")
+
+-- Minimized icon: random icon, draggable, never leaves the screen, tap to reopen
+local ICONS = {"⚡", "🔥", "💜", "👁️", "🌀", "☄️", "🎯", "🔮", "💎", "🌙", "⭐", "🗡️"}
+local rng = Random.new()
+local fab = mk("TextButton", {Text = "⚡", Font = FONTB, TextSize = 24, TextColor3 = TEXT, BackgroundColor3 = BG,
+    Size = UDim2.fromOffset(48, 48), Visible = false, AutoButtonColor = false, Active = true, ZIndex = 5}, gui)
+corner(fab, 24) stroke(fab, PURPLE, 2)
+mk("ImageLabel", {BackgroundTransparency = 1, Image = "rbxassetid://5028857084", ImageColor3 = PURPLE, ImageTransparency = 0.5,
+    ScaleType = Enum.ScaleType.Slice, SliceCenter = Rect.new(24, 24, 276, 276), Size = UDim2.new(1, 30, 1, 30),
+    Position = UDim2.fromOffset(-15, -15), ZIndex = 4}, fab)
+
+local function placeFab(x, y)
+    x, y = clampXY(x, y, Vector2.new(48, 48))
+    fab.Position = UDim2.fromOffset(x, y)
+end
+local function minimizeUI()
+    local mx, my = main.AbsolutePosition.X, main.AbsolutePosition.Y
+    fab.Text = ICONS[rng:NextInteger(1, #ICONS)]
+    placeFab(cfg("fab_x", mx + 8), cfg("fab_y", my + 8))
+    main.Visible, fab.Visible = false, true
+end
+local function restoreUI()
+    layoutMain(true)
+    main.Visible, fab.Visible = true, false
+end
+local function toggleUI() if main.Visible then minimizeUI() else restoreUI() end end
+minBtn.Activated:Connect(minimizeUI)
+makeDraggable(fab, fab, restoreUI, "fab_x", "fab_y")
+
+-- Re-fit when the screen size / orientation changes
+track(gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+    layoutMain(true)
+    if fab.Visible then placeFab(fab.Position.X.Offset, fab.Position.Y.Offset) end
+end))
+
+
+-- Calibration banner (shown while you tap a game button to register it)
+local banner = mk("Frame", {Size = UDim2.fromOffset(300, 44), Position = UDim2.new(0.5, -150, 0, 8), BackgroundColor3 = BG,
+    Visible = false, Active = true, ZIndex = 10}, gui)
+corner(banner, 8) stroke(banner, PURPLE, 2)
+local bannerText = mk("TextLabel", {Text = "", Font = FONT, TextSize = 13, TextColor3 = TEXT, BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -80, 1, 0), TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 11}, banner)
+local bannerCancel = mk("TextButton", {Text = "Cancel", Font = FONTB, TextSize = 12, TextColor3 = TEXT, BackgroundColor3 = PANEL2,
+    Size = UDim2.fromOffset(60, 28), Position = UDim2.new(1, -68, 0.5, -14), AutoButtonColor = false, ZIndex = 11}, banner)
+corner(bannerCancel, 6)
+bannerCancel.Activated:Connect(function() cancelCapture() banner.Visible = false restoreUI() end)
+local function startCal(name, label, onDone)
+    bannerText.Text = "Tap the game's " .. label .. " button now"
+    banner.Visible = true
+    minimizeUI()
+    captureCalibration(name, function()
+        banner.Visible = false
+        restoreUI()
+        onDone()
     end)
-    table.insert(SystemRegistry.Signals, childAddedConnection)
 end
 
-SystemRegistry.Hooks = {
-    InitCharacterHooks = function()
-        LocalPlayer.CharacterAdded:Connect(function(newCharacter)
-            task.wait(0.5)
-            AttachCombatListenersToCharacter(newCharacter)
-        end)
-        AttachCombatListenersToCharacter(LocalPlayer.Character)
-    end
-}
-SystemRegistry.Hooks.InitCharacterHooks()
+-- Tabs
+local Tabs, Tab = {}, {}
+Tab.__index = Tab
 
---===================================================================================--
--- LAYER 5: CHARACTER ORIENTATION LOCK CONTROLLERS
---===================================================================================--
-local function FaceCharacterTowardsTargetCoordinates(targetVector3)
-    local sourceCharacter = LocalPlayer.Character
-    local sourceRootPart = sourceCharacter and sourceCharacter:FindFirstChild("HumanoidRootPart")
-    if sourceRootPart then
-        local planarTargetCoordinates = Vector3.new(targetVector3.X, sourceRootPart.Position.Y, targetVector3.Z)
-        if (sourceRootPart.Position - planarTargetCoordinates).Magnitude > 0.05 then
-            sourceRootPart.CFrame = CFrame.new(sourceRootPart.Position, planarTargetCoordinates)
+local function selectTab(t)
+    for _, o in ipairs(Tabs) do
+        o.page.Visible = (o == t)
+        tw(o.btn, 0.15, {BackgroundColor3 = (o == t) and PURPLE or PANEL2, TextColor3 = (o == t) and Color3.new(1, 1, 1) or DIM})
+    end
+end
+
+local function newTab(name)
+    local btn = mk("TextButton", {Text = name, Font = FONT, TextSize = 12, TextColor3 = DIM, BackgroundColor3 = PANEL2,
+        Size = UDim2.new(1, 0, 0, 30), AutoButtonColor = false, LayoutOrder = #Tabs + 1}, sidebar)
+    corner(btn, 6)
+    local page = mk("ScrollingFrame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0,
+        ScrollBarThickness = 3, ScrollBarImageColor3 = PURPLE, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        Visible = false}, content)
+    mk("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, page)
+    mk("UIPadding", {PaddingRight = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6)}, page)
+    local t = setmetatable({page = page, btn = btn}, Tab)
+    Tabs[#Tabs + 1] = t
+    btn.MouseButton1Click:Connect(function() selectTab(t) end)
+    return t
+end
+
+local function row(page, h)
+    local f = mk("Frame", {Size = UDim2.new(1, 0, 0, h), BackgroundColor3 = PANEL, BorderSizePixel = 0}, page)
+    corner(f, 6)
+    stroke(f, Color3.fromRGB(70, 40, 110), 1, 0.3)
+    return f
+end
+
+local function safe(cb, ...) if cb then local ok, e = pcall(cb, ...) if not ok then log("Callback error:", e) end end end
+
+function Tab:Section(text)
+    mk("TextLabel", {Text = string.upper(text), Font = FONTB, TextSize = 11, TextColor3 = PURPLE, BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 0, 18), TextXAlignment = Enum.TextXAlignment.Left}, self.page)
+end
+
+function Tab:Label(text)
+    mk("TextLabel", {Text = text, Font = FONT, TextSize = 12, TextColor3 = DIM, BackgroundTransparency = 1, TextWrapped = true,
+        Size = UDim2.new(1, 0, 0, 30), TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top}, self.page)
+end
+
+function Tab:Button(text, cb)
+    local f = row(self.page, 32)
+    local b = mk("TextButton", {Text = text, Font = FONT, TextSize = 13, TextColor3 = TEXT, BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1)}, f)
+    b.MouseButton1Click:Connect(function() tw(f, 0.1, {BackgroundColor3 = PANEL2}) task.delay(0.12, function() tw(f, 0.2, {BackgroundColor3 = PANEL}) end) safe(cb) end)
+end
+
+function Tab:Toggle(text, flag, default, cb)
+    local on = cfg(flag, default or false)
+    Config[flag] = on
+    local f = row(self.page, 36)
+    mk("TextLabel", {Text = text, Font = FONT, TextSize = 13, TextColor3 = TEXT, BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -110, 1, 0), TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd}, f)
+    local state = mk("TextLabel", {Font = FONTB, TextSize = 10, BackgroundTransparency = 1, Size = UDim2.fromOffset(28, 36),
+        Position = UDim2.new(1, -86, 0, 0)}, f)
+    local sw = mk("Frame", {Size = UDim2.fromOffset(40, 20), Position = UDim2.new(1, -52, 0.5, -10), BackgroundColor3 = PANEL2}, f)
+    corner(sw, 10)
+    local sws = stroke(sw, PURPLE, 1)
+    local knob = mk("Frame", {Size = UDim2.fromOffset(14, 14), Position = UDim2.fromOffset(3, 3), BackgroundColor3 = DIM}, sw)
+    corner(knob, 7)
+    local function render()
+        state.Text = on and "ON" or "OFF"
+        tw(state, 0.15, {TextColor3 = on and PURPLE or DIM})
+        tw(sw, 0.15, {BackgroundColor3 = on and PURPLE or PANEL2})
+        tw(knob, 0.15, {Position = on and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3), BackgroundColor3 = on and Color3.new(1, 1, 1) or DIM})
+        sws.Transparency = on and 0 or 0.6
+    end
+    render()
+    local btn = mk("TextButton", {Text = "", BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1)}, f)
+    btn.MouseButton1Click:Connect(function()
+        on = not on
+        Config[flag] = on
+        render() save() safe(cb, on)
+    end)
+    task.defer(safe, cb, on) -- apply loaded state
+end
+
+function Tab:Slider(text, flag, min, max, default, step, cb)
+    local val = math.clamp(tonumber(cfg(flag, default)) or default, min, max)
+    Config[flag] = val
+    local f = row(self.page, 50)
+    mk("TextLabel", {Text = text, Font = FONT, TextSize = 13, TextColor3 = TEXT, BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(12, 4), Size = UDim2.new(1, -90, 0, 20), TextXAlignment = Enum.TextXAlignment.Left}, f)
+    local vl = mk("TextLabel", {Font = FONTB, TextSize = 12, TextColor3 = PURPLE, BackgroundTransparency = 1,
+        Position = UDim2.new(1, -78, 0, 4), Size = UDim2.fromOffset(66, 20), TextXAlignment = Enum.TextXAlignment.Right}, f)
+    local track_ = mk("Frame", {Position = UDim2.new(0, 12, 0, 33), Size = UDim2.new(1, -24, 0, 6), BackgroundColor3 = PANEL2}, f)
+    corner(track_, 3)
+    local fill = mk("Frame", {Size = UDim2.fromScale(0, 1), BackgroundColor3 = PURPLE}, track_)
+    corner(fill, 3)
+    local knob = mk("Frame", {Size = UDim2.fromOffset(12, 12), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0, 0.5),
+        BackgroundColor3 = Color3.new(1, 1, 1)}, fill)
+    corner(knob, 6)
+    local function set(v, silent)
+        v = math.clamp(math.floor(v / step + 0.5) * step, min, max)
+        val = v
+        Config[flag] = v
+        local a = (v - min) / (max - min)
+        fill.Size = UDim2.fromScale(a, 1)
+        knob.Position = UDim2.fromScale(1, 0.5)
+        vl.Text = tostring(math.floor(v * 1000 + 0.5) / 1000)
+        if not silent then save() safe(cb, v) end
+    end
+    set(val, true)
+    local dragging = false
+    local function fromInput(i) set(min + (max - min) * math.clamp((i.Position.X - track_.AbsolutePosition.X) / track_.AbsoluteSize.X, 0, 1)) end
+    local hit = mk("TextButton", {Text = "", BackgroundTransparency = 1, Position = UDim2.new(0, 0, 0, 24), Size = UDim2.new(1, 0, 0, 26)}, f)
+    hit.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            self.page.ScrollingEnabled = false
+            fromInput(i)
+        end
+    end)
+    track(UIS.InputChanged:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then fromInput(i) end
+    end))
+    track(UIS.InputEnded:Connect(function(i)
+        if dragging and (i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            self.page.ScrollingEnabled = true
+        end
+    end))
+    task.defer(safe, cb, val)
+end
+
+
+function Tab:Desc(text)
+    mk("TextLabel", {Text = text, Font = FONT, TextSize = 11, TextColor3 = DIM, BackgroundTransparency = 1, TextWrapped = true,
+        Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top}, self.page)
+end
+
+function Tab:CalRow(name, label)
+    local f = row(self.page, 36)
+    mk("TextLabel", {Text = label, Font = FONT, TextSize = 13, TextColor3 = TEXT, BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -170, 1, 0), TextXAlignment = Enum.TextXAlignment.Left}, f)
+    local st = mk("TextLabel", {Font = FONTB, TextSize = 11, BackgroundTransparency = 1, Size = UDim2.fromOffset(80, 36),
+        Position = UDim2.new(1, -150, 0, 0)}, f)
+    local btn = mk("TextButton", {Text = "Set", Font = FONTB, TextSize = 12, TextColor3 = TEXT, BackgroundColor3 = PURPLE,
+        Size = UDim2.fromOffset(56, 24), Position = UDim2.new(1, -66, 0.5, -12), AutoButtonColor = false}, f)
+    corner(btn, 6)
+    local function refresh()
+        local ok = isCalibrated(name)
+        st.Text = ok and "✔ SET" or "NOT SET"
+        st.TextColor3 = ok and PURPLE or DIM
+    end
+    refresh()
+    btn.Activated:Connect(function() startCal(name, label, refresh) end)
+    return refresh
+end
+
+function Tab:Keybind(text, flag, default)
+    local name = cfg(flag, default)
+    Config[flag] = name
+    if not HAS_KB then return end -- touch-only devices use the Action Pad instead
+    local f = row(self.page, 32)
+    mk("TextLabel", {Text = text, Font = FONT, TextSize = 13, TextColor3 = TEXT, BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -100, 1, 0), TextXAlignment = Enum.TextXAlignment.Left}, f)
+    local b = mk("TextButton", {Text = name, Font = FONTB, TextSize = 12, TextColor3 = PURPLE, BackgroundColor3 = PANEL2,
+        Size = UDim2.fromOffset(76, 22), Position = UDim2.new(1, -86, 0.5, -11), AutoButtonColor = false}, f)
+    corner(b, 5) stroke(b, PURPLE, 1, 0.4)
+    b.MouseButton1Click:Connect(function()
+        b.Text = "..."
+        local c
+        c = UIS.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.Keyboard then
+                if i.KeyCode ~= Enum.KeyCode.Escape then name = i.KeyCode.Name Config[flag] = name save() end
+                b.Text = name
+                c:Disconnect()
+            end
+        end)
+    end)
+end
+
+-------------------------------------------------- BUILD TABS
+local tMain   = newTab("Main")
+local tOpt    = newTab("Optimization")
+local tTechs  = newTab("Techs")
+local tVis    = newTab("Visuals")
+local tColor  = newTab("Game Color Changer")
+local tCD     = newTab("Cooldown Indicator")
+local tBlock  = newTab("Auto Block")
+local tLong   = newTab("Longslam V3")
+local tOreo   = newTab("Oreo")
+local tKyoto  = newTab("Auto-Kyoto V3")
+
+-- MAIN
+local pad -- forward declaration (built below)
+tMain:Section("General")
+tMain:Label("Techs rotate only your character; the camera is never modified. Keyboard users can rebind keys per tab. Phone/tablet users use the draggable Action Pad.")
+tMain:Keybind("Toggle UI Key", "ui_key", "RightShift")
+tMain:Slider("Tech Target Range (studs)", "t_range", 10, 120, 45, 1)
+tMain:Toggle("Mobile Action Pad", "mobile_btns", IS_TOUCH, function(on) if pad then pad.Visible = on end end)
+tMain:Toggle("Keep Touch Controls Visible", "keep_touch", true)
+
+tMain:Section("Mobile Setup (phone / tablet)")
+tMain:Label("Tap Set, then tap the matching button in the game once. The hub then presses that button for you - it never injects keyboard keys on touch, which is what hides the thumbstick.")
+local calStatus = {}
+for _, c in ipairs(CAL_LIST) do
+    local name, label = c[1], c[2]
+    calStatus[name] = tMain:CalRow(name, label)
+end
+
+tMain:Section("Config")
+tMain:Button("Save Config Now", function() saveQueued = false save() log("Config saved to " .. FILE) end)
+tMain:Button("Reset Config (delete file)", function()
+    if delfile and isfile and pcall(isfile, FILE) and isfile(FILE) then pcall(delfile, FILE) end
+    log("Config deleted - re-execute the script")
+end)
+tMain:Button("Unload Hub", function() if getgenv and getgenv().MerebennieHub then getgenv().MerebennieHub.Destroy() end end)
+
+-- OPTIMIZATION
+tOpt:Section("Performance")
+tOpt:Toggle("FPS Boost (disable effects/shadows)", "opt_boost", false, setBoost)
+tOpt:Slider("FPS Cap", "fps_cap", 30, 240, 60, 5, function(v) if setfpscap then pcall(setfpscap, v) end end)
+
+-- TECHS
+tTechs:Section("Shared")
+tTechs:Slider("Dash Power", "t_power", 20, 120, 60, 1)
+for _, e in ipairs(Entries) do
+    if e.tab == "techs" then
+        tTechs:Section(e.name)
+        tTechs:Desc(e.desc)
+        tTechs:Toggle(e.name, e.flag, false)
+        if e.key then tTechs:Keybind("   Key", e.key, e.dk) end
+        if e.flag == "t_twisted" then
+            tTechs:Slider("   Step Back (studs, raise with ping)", "tw_back", 0, 4, 0, 0.1)
+            tTechs:Slider("   Stop Distance", "tw_stop", 1.5, 5, 2.6, 0.1)
+            tTechs:Toggle("   Auto M1 After Dash", "tw_m1", false)
+        elseif e.flag == "t_supa2" then
+            tTechs:Slider("   Auto M1 Hits", "supa_hits", 0, 4, 1, 1)
+        elseif e.flag == "t_side3" then
+            tTechs:Slider("   Side Dash Cancel Move (0 = off)", "sd_cancel", 0, 4, 0, 1)
+            tTechs:Slider("   Cancel Delay (s)", "sd_delay", 0.03, 0.2, 0.08, 0.01)
+        elseif e.flag == "t_floater" then
+            tTechs:Slider("   Search Range (studs)", "fl_range", 10, 80, 35, 1)
+            tTechs:Slider("   Stay Distance (studs)", "fl_dist", 2, 7, 3, 0.5)
+            tTechs:Slider("   R-Pattern Arc (degrees)", "fl_arc", 30, 120, 70, 5)
+            tTechs:Slider("   Cycle Gap (s)", "fl_gap", 0.03, 0.5, 0.1, 0.01)
+            tTechs:Slider("   Max Loop Time (s)", "fl_time", 2, 30, 10, 1)
+            tTechs:Toggle("   Only While Target Is Airborne", "fl_aironly", true)
+            tTechs:Toggle("   Auto Hit Each Cycle", "fl_hit", true)
+            tTechs:Toggle("   Use Move Instead of M1", "fl_uppercut", false)
+            tTechs:Slider("   Move Slot", "fl_slot", 1, 4, 4, 1)
         end
     end
 end
+tTechs:Section("Side Dash Assist V2")
+tTechs:Desc("Hooks your own side dash. Finds the nearest enemy in range and arcs you around to their BACK (blind spot) while your character faces them. Camera untouched.")
+tTechs:Toggle("Side Dash Assist V2", "sda_on", false)
+tTechs:Keybind("   Game Dash Key (hook)", "dash_key", "Q")
+tTechs:Slider("   Activation Range (studs)", "sda_range", 5, 80, 30, 1)
+tTechs:Slider("   Orbit Arc Limit (degrees)", "sda_arc", 40, 200, 110, 5)
+tTechs:Slider("   Orbit Duration (s)", "sda_dur", 0.15, 0.8, 0.32, 0.01)
+tTechs:Toggle("   Flank To Back (off = use stick direction)", "sda_flank", true)
+tTechs:Section("Back Dash Cancel")
+tTechs:Desc("Hooks your back dash (S + dash). Cancels it mid-roll, optionally fires a move slot, then closes in on the target.")
+tTechs:Toggle("Back Dash Cancel", "bdc_on", false)
+tTechs:Slider("   Cancel Delay (s)", "bdc_delay", 0.03, 0.4, 0.12, 0.01)
+tTechs:Slider("   Cancel Into Move (0 = none)", "bdc_slot", 0, 4, 0, 1)
+tTechs:Section("Dash Detection (mobile)")
+tTechs:Desc("Touch players can't press the game's dash from here, so this notices the speed spike of a dash and triggers Side Dash Assist / Back Dash Cancel.")
+tTechs:Toggle("Auto-Detect Game Dash", "ad_on", IS_TOUCH)
+tTechs:Slider("   Dash Speed Threshold", "ad_speed", 25, 90, 45, 1)
 
---===================================================================================--
--- LAYER 6: GRAPHICAL USER INTERFACE ARCHITECTURE ("MEREBENNIE HUB V1.5")
---===================================================================================--
-local UserInterfaceEngine = {}
-function UserInterfaceEngine.CreateCoreCanvas()
-local screenGuiObject = Instance.new("ScreenGui")
-screenGuiObject.Name = "MerebennieHub_CanvasV15"
-screenGuiObject.ResetOnSpawn = false
-screenGuiObject.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-pcall(function()
-screenGuiObject.Parent = PlayerGui
-end)
-return screenGuiObject
+-- VISUALS
+tVis:Section("ESP / Lighting")
+tVis:Toggle("Player Highlight ESP", "v_esp", false, function() pcall(espStep) end)
+tVis:Toggle("Fullbright", "v_fb", false, setFullbright)
+
+-- COLOR CHANGER
+tColor:Section("Screen Color")
+tColor:Toggle("Enable Color Changer", "cc_on", false, applyCC)
+tColor:Slider("Tint Red", "cc_r", 0, 255, 255, 1, applyCC)
+tColor:Slider("Tint Green", "cc_g", 0, 255, 255, 1, applyCC)
+tColor:Slider("Tint Blue", "cc_b", 0, 255, 255, 1, applyCC)
+tColor:Slider("Saturation", "cc_sat", -1, 2, 0, 0.05, applyCC)
+tColor:Slider("Contrast", "cc_con", -1, 1, 0, 0.05, applyCC)
+tColor:Slider("Brightness", "cc_bri", -0.5, 0.5, 0, 0.02, applyCC)
+
+-- COOLDOWN INDICATOR
+tCD:Section("HUD")
+tCD:Desc("Shows each move's cooldown. Reads Tool attributes / Enabled state; if the game doesn't expose them it estimates from your last use. The HUD is draggable.")
+tCD:Toggle("Cooldown Indicator", "cd_on", false)
+tCD:Slider("Estimated Cooldown (s)", "cd_est", 1, 60, 10, 1)
+
+-- AUTO BLOCK
+tBlock:Section("360° Auto Block")
+tBlock:Desc("Blocks when an enemy within your radius is closing in fast (any direction) or just started an attack animation. On touch it presses the Block button you set in Main > Mobile Setup.")
+tBlock:Toggle("360° Auto Block", "ab_on", false)
+tBlock:Keybind("Block Key (keyboard only)", "ab_key", "F")
+tBlock:Slider("Detection Radius (studs)", "ab_radius", 6, 40, 18, 1)
+tBlock:Slider("Closing Speed Threshold", "ab_speed", 10, 90, 28, 1)
+tBlock:Slider("Block Hold Time (s)", "ab_hold", 0.1, 1.2, 0.35, 0.01)
+tBlock:Slider("Re-block Cooldown (s)", "ab_cd", 0.0, 0.5, 0.1, 0.01)
+tBlock:Toggle("Attack Animation Detection", "ab_anim", true)
+
+-- LONGSLAM / OREO / KYOTO
+tLong:Section("Longslam V3")
+tLong:Desc("Long-range downslam: hop-dashes toward the target and hits M1 on the way down so the slam lands from farther away than a normal jump.")
+tLong:Toggle("Longslam V3", "ls_on", false)
+tLong:Keybind("Trigger Key", "ls_key", "Z")
+tLong:Slider("Reach Multiplier", "ls_reach", 0.6, 2, 1.2, 0.05)
+tLong:Slider("Slam Delay (s)", "ls_delay", 0.1, 0.4, 0.22, 0.01)
+
+tOreo:Section("Oreo")
+tOreo:Desc("Interpretation of the 'sandwich': hit from the front, flank to the target's back, hit again, then cancel with a move. I couldn't find an official definition.")
+tOreo:Toggle("Oreo", "oreo_on", false)
+tOreo:Keybind("Trigger Key", "oreo_key", "X")
+tOreo:Slider("M1 Hits Per Side", "oreo_hits", 1, 5, 3, 1)
+tOreo:Slider("Finisher Move Slot (0 = none)", "oreo_slot", 0, 4, 3, 1)
+
+tKyoto:Section("Auto-Kyoto V3")
+tKyoto:Desc("Garou's Kyoto: Flowing Water, then side dash (or back dash) cancel as early as possible, then Lethal Whirlwind Stream. Press once to run, press again to stop.")
+tKyoto:Toggle("Auto-Kyoto V3", "ky_on", false)
+tKyoto:Keybind("Trigger Key", "ky_key", "C")
+tKyoto:Slider("Flowing Water Slot", "ky_a", 1, 4, 1, 1)
+tKyoto:Slider("Whirlwind Stream Slot", "ky_b", 1, 4, 2, 1)
+tKyoto:Slider("Wait Before Cancel (s)", "ky_wait", 0.2, 1.2, 0.5, 0.01)
+tKyoto:Toggle("Use Back Dash Cancel Instead", "ky_back", false)
+tKyoto:Toggle("3 M1s First", "ky_m1", false)
+tKyoto:Slider("Repeat Count", "ky_loops", 1, 6, 3, 1)
+tKyoto:Slider("Gap Between Repeats (s)", "ky_gap", 0.2, 1.5, 0.6, 0.05)
+
+-------------------------------------------------- COOLDOWN HUD
+local hud = mk("Frame", {Name = "CooldownHUD", BackgroundColor3 = BG, BackgroundTransparency = 0.15, Size = UDim2.fromOffset(170, 20),
+    Position = UDim2.new(0, 12, 1, -230), AutomaticSize = Enum.AutomaticSize.Y, Visible = false}, gui)
+corner(hud, 8) stroke(hud, PURPLE, 1.5)
+mk("UIListLayout", {Padding = UDim.new(0, 2)}, hud)
+mk("UIPadding", {PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4), PaddingLeft = UDim.new(0, 8)}, hud)
+hud.Active = true
+if Config.hud_x then hud.Position = UDim2.fromOffset(Config.hud_x, Config.hud_y) end
+makeDraggable(hud, hud, nil, "hud_x", "hud_y")
+local hudLabels, hooked, lastUse = {}, {}, {}
+
+local function cdStep()
+    hud.Visible = cfg("cd_on", false)
+    if not hud.Visible then return end
+    local tools = {}
+    local bp, ch = lp:FindFirstChildOfClass("Backpack"), lp.Character
+    for _, src in ipairs({bp, ch}) do
+        if src then for _, t in ipairs(src:GetChildren()) do if t:IsA("Tool") then tools[#tools + 1] = t end end end
+    end
+    for _, t in ipairs(tools) do
+        if not hooked[t] then hooked[t] = t.Activated:Connect(function() lastUse[t] = os.clock() end) end
+        local lbl = hudLabels[t]
+        if not lbl then
+            lbl = mk("TextLabel", {Font = FONT, TextSize = 12, BackgroundTransparency = 1, Size = UDim2.new(1, -8, 0, 16),
+                TextXAlignment = Enum.TextXAlignment.Left}, hud)
+            hudLabels[t] = lbl
+        end
+        local rem = tonumber(t:GetAttribute("Cooldown") or t:GetAttribute("CD") or t:GetAttribute("CooldownTime"))
+        if not rem or rem <= 0 then
+            local cv = t:FindFirstChild("Cooldown")
+            if cv and cv:IsA("NumberValue") then rem = cv.Value end
+        end
+        if (not rem or rem <= 0) and t.Enabled == false then rem = 1 end
+        if (not rem or rem <= 0) and lastUse[t] then rem = cfg("cd_est", 10) - (os.clock() - lastUse[t]) end
+        if rem and rem > 0 then
+            lbl.Text = string.format("%s  %.1fs", t.Name, rem)
+            lbl.TextColor3 = Color3.fromRGB(255, 90, 120)
+        else
+            lbl.Text = t.Name .. "  READY"
+            lbl.TextColor3 = PURPLE
+        end
+    end
+    for t, l in pairs(hudLabels) do
+        if not t.Parent then l:Destroy() hudLabels[t] = nil if hooked[t] then hooked[t]:Disconnect() hooked[t] = nil end end
+    end
 end
-local CoreCanvas = UserInterfaceEngine.CreateCoreCanvas()
-local function BuildUserInterfaceLayout()
-local cachedColors = SystemRegistry.Storage.ActiveCache
-local containerFrame = Instance.new("Frame")
-containerFrame.Name = "MerebennieMainFrame"
-containerFrame.Size = UDim2.new(0, 540, 0, 370)
-containerFrame.Position = UDim2.new(0.5, -270, 0.5, -185)
-containerFrame.BackgroundColor3 = Color3.fromRGB(cachedColors.SecondaryColor[1], cachedColors.SecondaryColor[2], cachedColors.SecondaryColor[3])
-containerFrame.BorderSizePixel = 0
-containerFrame.Active = true
-containerFrame.Draggable = true
-containerFrame.Visible = cachedColors.GuiVisible
-containerFrame.Parent = CoreCanvas
-local containerCorner = Instance.new("UICorner")
-containerCorner.CornerRadius = UDim.new(0, 10)
-containerCorner.Parent = containerFrame
-local neonBorderStroke = Instance.new("UIStroke")
-neonBorderStroke.Thickness = 2.5
-neonBorderStroke.Color = Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3])
-neonBorderStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-neonBorderStroke.Parent = containerFrame
-local applicationTitle = Instance.new("TextLabel")
-applicationTitle.Size = UDim2.new(1, -20, 0, 50)
-applicationTitle.Position = UDim2.new(0, 15, 0, 0)
-applicationTitle.BackgroundTransparency = 1
-applicationTitle.Text = "Merebennie Hub V1.5"
-applicationTitle.TextColor3 = Color3.fromRGB(cachedColors.AccentColor[1], cachedColors.AccentColor[2], cachedColors.AccentColor[3])
-applicationTitle.Font = Enum.Font.GothamBold
-applicationTitle.TextSize = 18
-applicationTitle.TextXAlignment = Enum.TextXAlignment.Left
-applicationTitle.Parent = containerFrame
-local dynamicTabList = Instance.new("Frame")
-dynamicTabList.Size = UDim2.new(0, 140, 1, -65)
-dynamicTabList.Position = UDim2.new(0, 12, 0, 52)
-dynamicTabList.BackgroundColor3 = Color3.fromRGB(22, 17, 30)
-dynamicTabList.BorderSizePixel = 0
-dynamicTabList.Parent = containerFrame
-local tabListCorner = Instance.new("UICorner")
-tabListCorner.CornerRadius = UDim.new(0, 8)
-tabListCorner.Parent = dynamicTabList
-local primaryScrollContainer = Instance.new("ScrollingFrame")
-primaryScrollContainer.Size = UDim2.new(1, -175, 1, -65)
-primaryScrollContainer.Position = UDim2.new(0, 163, 0, 52)
-primaryScrollContainer.BackgroundTransparency = 1
-primaryScrollContainer.CanvasSize = UDim2.new(0, 0, 0, 750)
-primaryScrollContainer.ScrollBarThickness = 5
-primaryScrollContainer.ScrollBarImageColor3 = Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3])
-primaryScrollContainer.Parent = containerFrame
-local contentLayoutManager = Instance.new("UIListLayout")
-contentLayoutManager.Padding = UDim.new(0, 8)
-contentLayoutManager.SortOrder = Enum.SortOrder.LayoutOrder
-contentLayoutManager.Parent = primaryScrollContainer
-local internalControlBuilders = {}
-function internalControlBuilders.InjectToggleElement(displayName, cacheKey)
-local frameLayout = Instance.new("Frame")
-frameLayout.Size = UDim2.new(1, -10, 0, 45)
-frameLayout.BackgroundColor3 = Color3.fromRGB(26, 20, 36)
-frameLayout.BorderSizePixel = 0
-frameLayout.Parent = primaryScrollContainer
-local cornerLayout = Instance.new("UICorner")
-cornerLayout.CornerRadius = UDim.new(0, 6)
-cornerLayout.Parent = frameLayout
-local labelLayout = Instance.new("TextLabel")
-labelLayout.Size = UDim2.new(1, -70, 1, 0)
-labelLayout.Position = UDim2.new(0, 12, 0, 0)
-labelLayout.BackgroundTransparency = 1
-labelLayout.Text = displayName
-labelLayout.TextColor3 = Color3.fromRGB(225, 215, 240)
-labelLayout.Font = Enum.Font.GothamSemibold
-labelLayout.TextSize = 13
-labelLayout.TextXAlignment = Enum.TextXAlignment.Left
-labelLayout.Parent = frameLayout
-local interactiveButton = Instance.new("TextButton")
-interactiveButton.Size = UDim2.new(0, 52, 0, 26)
-interactiveButton.Position = UDim2.new(1, -64, 0.5, -13)
-interactiveButton.BackgroundColor3 = SystemRegistry.Storage.ActiveCache[cacheKey] and Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3]) or Color3.fromRGB(46, 40, 60)
-interactiveButton.Text = ""
-interactiveButton.Parent = frameLayout
-local buttonCorner = Instance.new("UICorner")
-buttonCorner.CornerRadius = UDim.new(1, 0)
-buttonCorner.Parent = interactiveButton
-interactiveButton.MouseButton1Click:Connect(function()
-SystemRegistry.Storage.ActiveCache[cacheKey] = not SystemRegistry.Storage.ActiveCache[cacheKey]
-SaveSystemConfiguration()
-TweenService:Create(interactiveButton, TweenInfo.new(0.2), {
-BackgroundColor3 = SystemRegistry.Storage.ActiveCache[cacheKey] and Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3]) or Color3.fromRGB(46, 40, 60)
-}):Play()
-end)
+
+-------------------------------------------------- MOBILE ACTION PAD
+local PadList = {}
+for _, e in ipairs(Entries) do PadList[#PadList + 1] = {(e.name:gsub(" %[REWORKED%]", "*")), e.flag, e.fn} end
+
+pad = mk("Frame", {Name = "ActionPad", BackgroundColor3 = BG, BackgroundTransparency = 0.15, Size = UDim2.fromOffset(124, 10),
+    AutomaticSize = Enum.AutomaticSize.Y, Active = true, Visible = cfg("mobile_btns", IS_TOUCH)}, gui)
+corner(pad, 8) stroke(pad, PURPLE, 1.5)
+mk("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, pad)
+mk("UIPadding", {PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 6), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, pad)
+local grip = mk("TextLabel", {Text = "⠿ ACTION PAD", Font = FONTB, TextSize = 11, TextColor3 = PURPLE, BackgroundColor3 = PANEL,
+    Size = UDim2.new(1, 0, 0, 22), Active = true, LayoutOrder = 0}, pad)
+corner(grip, 5)
+do
+    -- default: top-right, away from the thumbstick (bottom-left) and jump button (bottom-right)
+    local vp = viewport()
+    local px, py = clampXY(cfg("pad_x", vp.X - 134), cfg("pad_y", 50), Vector2.new(124, 40))
+    pad.Position = UDim2.fromOffset(px, py)
 end
-function internalControlBuilders.InjectSliderElement(displayName, cacheKey, minVal, maxVal, descriptorUnit)
-local frameLayout = Instance.new("Frame")
-frameLayout.Size = UDim2.new(1, -10, 0, 56)
-frameLayout.BackgroundColor3 = Color3.fromRGB(26, 20, 36)
-frameLayout.BorderSizePixel = 0
-frameLayout.Parent = primaryScrollContainer
-local cornerLayout = Instance.new("UICorner")
-cornerLayout.CornerRadius = UDim.new(0, 6)
-cornerLayout.Parent = frameLayout
-local labelLayout = Instance.new("TextLabel")
-labelLayout.Size = UDim2.new(0.65, 0, 0, 26)
-labelLayout.Position = UDim2.new(0, 12, 0, 2)
-labelLayout.BackgroundTransparency = 1
-labelLayout.Text = displayName
-labelLayout.TextColor3 = Color3.fromRGB(225, 215, 240)
-labelLayout.Font = Enum.Font.GothamSemibold
-labelLayout.TextSize = 13
-labelLayout.TextXAlignment = Enum.TextXAlignment.Left
-labelLayout.Parent = frameLayout
-local displayValueLabel = Instance.new("TextLabel")
-displayValueLabel.Size = UDim2.new(0.3, 0, 0, 26)
-displayValueLabel.Position = UDim2.new(0.65, 0, 0, 2)
-displayValueLabel.BackgroundTransparency = 1
-displayValueLabel.Text = tostring(SystemRegistry.Storage.ActiveCache[cacheKey]) .. descriptorUnit
-displayValueLabel.TextColor3 = Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3])
-displayValueLabel.Font = Enum.Font.GothamBold
-displayValueLabel.TextSize = 13
-displayValueLabel.TextXAlignment = Enum.TextXAlignment.Right
-displayValueLabel.Parent = frameLayout
-local sliderTrack = Instance.new("TextButton")
-sliderTrack.Size = UDim2.new(1, -24, 0, 6)
-sliderTrack.Position = UDim2.new(0, 12, 0, 38)
-sliderTrack.BackgroundColor3 = Color3.fromRGB(54, 46, 70)
-sliderTrack.Text = ""
-sliderTrack.Parent = frameLayout
-local currentPercentage = math.clamp((SystemRegistry.Storage.ActiveCache[cacheKey] - minVal) / (maxVal - minVal), 0, 1)
-local sliderFill = Instance.new("Frame")
-sliderFill.Size = UDim2.new(currentPercentage, 0, 1, 0)
-sliderFill.BackgroundColor3 = Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3])
-sliderFill.BorderSizePixel = 0
-sliderFill.Parent = sliderTrack
-local isUserDraggingSlider = false
-local function ProcessSliderAdjustment(inputObject)
-local boundedPercentage = math.clamp((inputObject.Position.X - sliderTrack.AbsolutePosition.X) / sliderTrack.AbsoluteSize.X, 0, 1)
-sliderFill.Size = UDim2.new(boundedPercentage, 0, 1, 0)
-local calculatedInteger = math.floor(minVal + (boundedPercentage * (maxVal - minVal)))
-displayValueLabel.Text = tostring(calculatedInteger) .. descriptorUnit
-SystemRegistry.Storage.ActiveCache[cacheKey] = calculatedInteger
-SaveSystemConfiguration()
+makeDraggable(grip, pad, nil, "pad_x", "pad_y")
+
+local padBtns = {}
+for n, e in ipairs(PadList) do
+    local b = mk("TextButton", {Text = e[1], Font = FONT, TextSize = 12, TextColor3 = TEXT, TextWrapped = true, BackgroundColor3 = PANEL2,
+        Size = UDim2.new(1, 0, 0, 34), AutoButtonColor = false, LayoutOrder = n, Visible = false}, pad)
+    corner(b, 6) stroke(b, PURPLE, 1, 0.3)
+    b.Activated:Connect(function()
+        tw(b, 0.08, {BackgroundColor3 = PURPLE})
+        task.delay(0.15, function() tw(b, 0.2, {BackgroundColor3 = PANEL2}) end)
+        if cfg(e[2], false) then task.spawn(function() pcall(e[3]) end) end
+    end)
+    padBtns[#padBtns + 1] = {btn = b, flag = e[2]}
 end
-sliderTrack.InputBegan:Connect(function(inputObject)
-if inputObject.UserInputType == Enum.UserInputType.MouseButton1 or inputObject.UserInputType == Enum.UserInputType.Touch then
-isUserDraggingSlider = true
-ProcessSliderAdjustment(inputObject)
+local function refreshPad() for _, p in ipairs(padBtns) do p.btn.Visible = cfg(p.flag, false) end end
+
+-- Make taps on our own UI never get captured by calibration
+isOverOwnUI = function(p)
+    local function inside(f)
+        if not f or not f.Visible then return false end
+        local a, s = f.AbsolutePosition, f.AbsoluteSize
+        for _, dy in ipairs({0, 36}) do
+            local y = p.Y + dy
+            if p.X >= a.X and p.X <= a.X + s.X and y >= a.Y and y <= a.Y + s.Y then return true end
+        end
+        return false
+    end
+    return inside(banner) or inside(fab) or inside(main) or inside(pad)
 end
-end)
-UserInputService.InputChanged:Connect(function(inputObject)
-if isUserDraggingSlider and (inputObject.UserInputType == Enum.UserInputType.MouseMovement or inputObject.UserInputType == Enum.UserInputType.Touch) then
-ProcessSliderAdjustment(inputObject)
+
+-------------------------------------------------- INPUT + MAIN LOOP
+track(UIS.InputBegan:Connect(function(i)
+    if i.UserInputType ~= Enum.UserInputType.Keyboard or UIS:GetFocusedTextBox() then return end
+    local k = i.KeyCode
+    if k == getKey("ui_key", "RightShift") then toggleUI() return end
+    for _, e in ipairs(Entries) do
+        if e.key and cfg(e.flag, false) and k == getKey(e.key, e.dk) then
+            task.spawn(function() pcall(e.fn) end)
+            return
+        end
+    end
+    -- Hooks onto the game's own dash (keyboard)
+    if k == getKey("dash_key", "Q") then
+        if cfg("bdc_on", false) and backHeld() and not sideSign() then
+            task.spawn(function() pcall(backDashCancel) end)
+        elseif cfg("sda_on", false) and sideSign() then
+            task.spawn(function() task.wait(0.03) pcall(sideDashAssist) end)
+        end
+    end
+end))
+
+local blockAcc, slowAcc, cdAcc, guardAcc = 0, 0, 0, 0
+track(RunService.Heartbeat:Connect(function(dt)
+    if not Alive then return end
+    pcall(dashDetect, dt)
+    blockAcc += dt
+    if blockAcc >= 0.05 then blockAcc = 0 pcall(autoBlockStep) end
+    cdAcc += dt
+    if cdAcc >= 0.15 then cdAcc = 0 pcall(cdStep) pcall(refreshPad) end
+    guardAcc += dt
+    if guardAcc >= 0.5 then guardAcc = 0 pcall(guardTouch) end
+    slowAcc += dt
+    if slowAcc >= 1 then slowAcc = 0 pcall(espStep) end
+end))
+
+-------------------------------------------------- FINISH
+selectTab(Tabs[1])
+
+local function destroy()
+    Alive = false
+    KyRun, FL.run = false, false
+    pcall(cancelCapture)
+    for _, c in ipairs(Conns) do pcall(function() c:Disconnect() end) end
+    for _, c in pairs(hooked) do pcall(function() c:Disconnect() end) end
+    pcall(setBoost, false)
+    pcall(setFullbright, false)
+    pcall(function() CC:Destroy() end)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character then local h = p.Character:FindFirstChild("MBHub_ESP") if h then h:Destroy() end end
+    end
+    pcall(function() gui:Destroy() end)
+    log("Unloaded")
 end
-end)
-UserInputService.InputEnded:Connect(function(inputObject)
-if inputObject.UserInputType == Enum.UserInputType.MouseButton1 or inputObject.UserInputType == Enum.UserInputType.Touch then
-isUserDraggingSlider = false
-end
-end)
-end
-local combatTabButton = Instance.new("TextButton")
-combatTabButton.Size = UDim2.new(1, -12, 0, 40)
-combatTabButton.Position = UDim2.new(0, 6, 0, 6)
-combatTabButton.BackgroundColor3 = Color3.fromRGB(38, 30, 54)
-combatTabButton.Text = "Combat System"
-combatTabButton.TextColor3 = Color3.fromRGB(245, 240, 255)
-combatTabButton.Font = Enum.Font.GothamBold
-combatTabButton.TextSize = 13
-combatTabButton.Parent = dynamicTabList
-local tabButtonCorner = Instance.new("UICorner")
-tabButtonCorner.CornerRadius = UDim.new(0, 5)
-tabButtonCorner.Parent = combatTabButton
--- Instantiate interface toggles and continuous adjustments
-internalControlBuilders.InjectToggleElement("Complex Floater Tech", "FloaterTech")
-internalControlBuilders.InjectSliderElement("Float Velocity Cutoff", "FloatHeight", 5, 40, " Vel")
-internalControlBuilders.InjectToggleElement("Supa Tech V2 (Combo)", "SupaTechV2")
-internalControlBuilders.InjectToggleElement("Instant Twisted", "InstantTwisted")
-internalControlBuilders.InjectToggleElement("Supa V3 Extended", "SupaV3")
-internalControlBuilders.InjectSliderElement("Supa V3 Frame Delay", "SupaV3Delay", 50, 400, "ms")
-internalControlBuilders.InjectToggleElement("Side Dash V3", "SideDashV3")
-internalControlBuilders.InjectToggleElement("Lix Tech [REWORKED]", "LixTech")
-internalControlBuilders.InjectToggleElement("Back Dash Cancel", "BackDashCancel")
-internalControlBuilders.InjectToggleElement("BOOMY Instant Twisted", "BoomyTwisted")
-internalControlBuilders.InjectToggleElement("Automated Side Dash Assist V2", "SideDashAssistV2")
-internalControlBuilders.InjectSliderElement("Assist Scan Range", "AssistRange", 10, 100, " Studs")
-internalControlBuilders.InjectToggleElement("360-Degree Auto Block", "AutoBlock360")
-local floatMenuToggle = Instance.new("TextButton")
-floatMenuToggle.Size = UDim2.new(0, 80, 0, 35)
-floatMenuToggle.Position = UDim2.new(0, 15, 0, 15)
-floatMenuToggle.BackgroundColor3 = Color3.fromRGB(12, 9, 18)
-floatMenuToggle.Text = "Merebennie"
-floatMenuToggle.TextColor3 = Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3])
-floatMenuToggle.Font = Enum.Font.GothamBold
-floatMenuToggle.TextSize = 11
-floatMenuToggle.Parent = CoreCanvas
-local toggleButtonCorner = Instance.new("UICorner")
-toggleButtonCorner.CornerRadius = UDim.new(0, 6)
-toggleButtonCorner.Parent = floatMenuToggle
-local toggleButtonStroke = Instance.new("UIStroke")
-toggleButtonStroke.Thickness = 1.5
-toggleButtonStroke.Color = Color3.fromRGB(cachedColors.PrimaryColor[1], cachedColors.PrimaryColor[2], cachedColors.PrimaryColor[3])
-toggleButtonStroke.Parent = floatMenuToggle
-floatMenuToggle.MouseButton1Click:Connect(function()
-SystemRegistry.Storage.ActiveCache.GuiVisible = not SystemRegistry.Storage.ActiveCache.GuiVisible
-containerFrame.Visible = SystemRegistry.Storage.ActiveCache.GuiVisible
-SaveSystemConfiguration()
-end)
-end
-BuildUserInterfaceLayout()
---===================================================================================--
--- LAYER 7: AUTOMATED REAL COMBAT EXECUTION LOOPS ("TECHS")
---===================================================================================--
--- Execution loop 1: Advanced Physics Automation (Complex Floater Tech Engine)
-RunService.Heartbeat:Connect(function()
-if not SystemRegistry.Storage.ActiveCache.FloaterTech then return end
-local nativeCharacter = LocalPlayer.Character
-local coreRootPart = nativeCharacter and nativeCharacter:FindFirstChild("HumanoidRootPart")
-local coreHumanoid = nativeCharacter and nativeCharacter:FindFirstChild("Humanoid")
-if not coreRootPart or not coreHumanoid then return end
-local currentVelocityVector = coreRootPart.AssemblyLinearVelocity
-local activeState = coreHumanoid:GetState()
-if activeState == Enum.HumanoidStateType.FreeFall or currentVelocityVector.Y < -12 then
-local targetGroundRaycast = AdvancedMathModule.ScanTerrainClearance(nativeCharacter)
-if targetGroundRaycast and targetGroundRaycast.Distance <= 7 then
--- Bounce Suppression mechanism activated
-local configuredVelocityCutoff = SystemRegistry.Storage.ActiveCache.FloatHeight
-coreRootPart.AssemblyLinearVelocity = Vector3.new(currentVelocityVector.X, math.clamp(currentVelocityVector.Y, -1, configuredVelocityCutoff), currentVelocityVector.Z)
-local internalBodyVelocity = coreRootPart:FindFirstChild("MerebennieVForce") or Instance.new("BodyVelocity")
-internalBodyVelocity.Name = "MerebennieVForce"
-internalBodyVelocity.MaxForce = Vector3.new(0, 16000, 0)
-internalBodyVelocity.Velocity = Vector3.new(0, configuredVelocityCutoff * 0.45, 0)
-internalBodyVelocity.Parent = coreRootPart
-end
-else
-local existingForceObject = coreRootPart:FindFirstChild("MerebennieVForce")
-if existingForceObject then
-existingForceObject:Destroy()
-end
-end
-end)
--- Execution loop 2: Sequence Automation Matrix
-RunService.PreSimulation:Connect(function()
-local executionCharacter = LocalPlayer.Character
-local executionRootPart = executionCharacter and executionCharacter:FindFirstChild("HumanoidRootPart")
-local executionHumanoid = executionCharacter and executionCharacter:FindFirstChild("Humanoid")
-if not executionRootPart or not executionHumanoid then return end
-local activeCacheReference = SystemRegistry.Storage.ActiveCache
--- Enforce absolute 5-second lifespan on target acquisition link cache
-if SystemRegistry.TargetingEngine.ActiveTarget and (tick() - SystemRegistry.TargetingEngine.LockTimestamp > SystemRegistry.TargetingEngine.ExpirationPeriod) then
-SystemRegistry.TargetingEngine.ActiveTarget = nil
-end
--- Supa Tech V2 & V3 Smart Automated Combo Extender Engine
-local currentTargetObject = SystemRegistry.TargetingEngine.ActiveTarget
-if (activeCacheReference.SupaTechV2 or activeCacheReference.SupaV3) and currentTargetObject and currentTargetObject:FindFirstChild("HumanoidRootPart") then
-local targetRootPart = currentTargetObject.HumanoidRootPart
-local structuralDistance = (executionRootPart.Position - targetRootPart.Position).Magnitude
-if executionCharacter:FindFirstChild("Attacking") and structuralDistance <= 18 then
-FaceCharacterTowardsTargetCoordinates(targetRootPart.Position)
-if activeCacheReference.SupaV3 then
-task.wait(activeCacheReference.SupaV3Delay / 1000)
-end
--- Frame execution combo tracking displacement math
-executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(0, 0, 1.4)
-task.wait(0.01)
-executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(0, 0, -6.5)
-SystemRegistry.TargetingEngine.ActiveTarget = nil
-end
-end
--- Instant Twisted & BOOMY Variant Mechanics Engine
-if (activeCacheReference.InstantTwisted or activeCacheReference.BoomyTwisted) and executionCharacter:FindFirstChild("Attacking") then
-local nearestThreatModel = FetchOptimalProximityTarget(15)
-if nearestThreatModel and nearestThreatModel:FindFirstChild("HumanoidRootPart") then
-local enemyCoordinates = nearestThreatModel.HumanoidRootPart.Position
-if activeCacheReference.BoomyTwisted then
-executionRootPart.CFrame = CFrame.new(executionRootPart.Position, Vector3.new(enemyCoordinates.X, executionRootPart.Position.Y, enemyCoordinates.Z)) * CFrame.Angles(0, math.rad(115), 0)
-executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(0, 0, -5)
-else
-executionRootPart.CFrame = CFrame.new(executionRootPart.Position, Vector3.new(enemyCoordinates.X, executionRootPart.Position.Y, enemyCoordinates.Z)) * CFrame.Angles(0, math.rad(90), 0)
-executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(0, 0, -5)
-end
-end
-end
--- Side Dash V3 Engine
-if activeCacheReference.SideDashV3 and executionCharacter:FindFirstChild("Dashing") then
-local dynamicThreatModel = FetchOptimalProximityTarget(25)
-if dynamicThreatModel and dynamicThreatModel:FindFirstChild("HumanoidRootPart") then
-FaceCharacterTowardsTargetCoordinates(dynamicThreatModel.HumanoidRootPart.Position)
-executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(7, 0, 0)
-end
-end
--- Lix Tech Animation Reworked Engine
-if activeCacheReference.LixTech and executionCharacter:FindFirstChild("Attacking") then
-executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(0.5, 0, -0.5)
-RunService.RenderStepped:Wait()
-executionRootPart.CFrame = executionRootPart.CFrame * CFrame.new(-0.5, 0, 0.5)
-end
--- Back Dash Cancel Override Engine
-if activeCacheReference.BackDashCancel and executionCharacter:FindFirstChild("BackDashing") then
-pcall(function()
-executionCharacter.BackDashing:Destroy()
-end)
-executionRootPart.AssemblyLinearVelocity = executionRootPart.CFrame.LookVector * 52
-end
--- Automated Side Dash Assist V2 Module
-if activeCacheReference.SideDashAssistV2 then
-local prioritizedEnemyCharacter = FetchOptimalProximityTarget(activeCacheReference.AssistRange)
-if prioritizedEnemyCharacter and prioritizedEnemyCharacter:FindFirstChild("HumanoidRootPart") then
-local enemyRootCoordinates = prioritizedEnemyCharacter.HumanoidRootPart.Position
-FaceCharacterTowardsTargetCoordinates(enemyRootCoordinates)
-local targetOrbitCFrame = executionRootPart.CFrame * CFrame.new(8, 0, -4)
-executionRootPart.CFrame = executionRootPart.CFrame:Keep(0.16)
-executionRootPart.CFrame = executionRootPart.CFrame:Lerp(CFrame.new(targetOrbitCFrame.Position, Vector3.new(enemyRootCoordinates.X, executionRootPart.Position.Y, enemyRootCoordinates.Z)), 0.16)
-end
-end
-end)
---===================================================================================--
--- LAYER 8: 360-DEGREE RADIAL DETECTOR & AUTO BLOCK MECHANIC
---===================================================================================--
-RunService.Stepped:Connect(function()
-if not SystemRegistry.Storage.ActiveCache.AutoBlock360 then return end
-local checkingCharacter = LocalPlayer.Character
-local checkingRootPart = checkingCharacter and checkingCharacter:FindFirstChild("HumanoidRootPart")
-if not checkingRootPart then return end
-local systemPlayers = Players:GetPlayers()
-for activeIndex = 1, #systemPlayers do
-local externalPlayer = systemPlayers[activeIndex]
-if externalPlayer ~= LocalPlayer and externalPlayer.Character then
-local opponentCharacter = externalPlayer.Character
-local opponentRootPart = opponentCharacter:FindFirstChild("HumanoidRootPart")
-if opponentRootPart then
-if opponentCharacter:FindFirstChild("Attacking") or opponentCharacter:FindFirstChild("ForwardV") or opponentCharacter:FindFirstChild("DashVelocity") then
-local structuralRadiusDistance = (checkingRootPart.Position - opponentRootPart.Position).Magnitude
-if structuralRadiusDistance <= 16.5 then
-local activeGuardTool = checkingCharacter:FindFirstChild("Block") or checkingCharacter:FindFirstChild("Guard")
-if activeGuardTool and activeGuardTool:IsA("Tool") then
-activeGuardTool:Activate()
-end
-end
-end
-end
-end
-end
-end)
-print("[MEREBENNIE HUB]: Fully integrated modular code logic engine initiated successfully.")
+if getgenv then getgenv().MerebennieHub = {Destroy = destroy} end
+
+if setfpscap then pcall(setfpscap, cfg("fps_cap", 60)) end
+applyCC()
+log("Loaded V1.5 - press " .. cfg("ui_key", "RightShift") .. " or tap the M button to toggle the UI")
